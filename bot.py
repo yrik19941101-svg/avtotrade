@@ -26,11 +26,12 @@ class TradingBot:
                 'adjustForTimeDifference': True
             }
         })
-        # Загружаем рынки (это обязательно для BingX)
-        self.exchange.load_markets()
-        logger.info("Рынки загружены")
         self.state = {}
         self.open_positions = {}
+
+    async def load_markets(self):
+        await self.exchange.load_markets()
+        logger.info("Рынки загружены")
 
     async def load_symbols(self):
         self.all_symbols = self.config['symbols']
@@ -53,10 +54,11 @@ class TradingBot:
             return base
         return base * (2 ** step)
 
-    async def set_leverage(self, symbol, leverage, side):
+    async def set_leverage(self, symbol, leverage, position_side):
         try:
-            await self.exchange.set_leverage(leverage, symbol, params={'side': side})
-            logger.info(f"Плечо {leverage}x для {symbol} ({side})")
+            # Для BingX в хедж-режиме нужно указывать positionSide
+            await self.exchange.set_leverage(leverage, symbol, params={'positionSide': position_side})
+            logger.info(f"Плечо {leverage}x для {symbol} ({position_side})")
         except Exception as e:
             logger.error(f"Ошибка плеча {symbol}: {e}")
 
@@ -64,8 +66,8 @@ class TradingBot:
         try:
             leverage = self.get_leverage(symbol)
             trade_amount = self.get_trade_amount(symbol)
-            side = 'LONG' if direction == 'LONG' else 'SHORT'
-            await self.set_leverage(symbol, leverage, side)
+            position_side = 'LONG' if direction == 'LONG' else 'SHORT'
+            await self.set_leverage(symbol, leverage, position_side)
 
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
@@ -73,12 +75,13 @@ class TradingBot:
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            await self.exchange.create_order(
+            # Добавляем positionSide в параметры ордера
+            order = await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=order_side,
                 amount=quantity,
-                params={'reduceOnly': False}
+                params={'positionSide': position_side}
             )
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
 
@@ -100,7 +103,8 @@ class TradingBot:
                 'take_price': take_price,
                 'timestamp': datetime.now()
             }
-            logger.info(f"Стоп: {stop_price:.5f}, Тейк: {take_price:.5f}")
+            logger.info(f"Стоп: {stop_price:.5f} ({abs(stop_price/price - 1)*100:.2f}%)")
+            logger.info(f"Тейк: {take_price:.5f} ({abs(take_price/price - 1)*100:.2f}%)")
         except Exception as e:
             logger.error(f"Ошибка открытия {symbol}: {e}")
 
@@ -118,11 +122,11 @@ class TradingBot:
             if reason == 'stop_loss':
                 step = self.state.get(symbol, {}).get('martingale_step', 0) + 1
                 self.state.setdefault(symbol, {})['martingale_step'] = step
-                logger.info(f"{symbol}: мартингейл шаг {step}")
+                logger.info(f"{symbol}: стоп-лосс, шаг {step}")
             else:
                 if symbol in self.state:
                     self.state[symbol]['martingale_step'] = 0
-                logger.info(f"{symbol}: мартингейл сброшен")
+                logger.info(f"{symbol}: тейк-профит, мартингейл сброшен")
             del self.open_positions[symbol]
         except Exception as e:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
@@ -212,6 +216,7 @@ class TradingBot:
                 state['signal_sent'] = True
 
     async def run(self):
+        await self.load_markets()
         await self.load_symbols()
         asyncio.create_task(self.monitor_positions())
         while True:
