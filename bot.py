@@ -28,6 +28,7 @@ class TradingBot:
         })
         self.consecutive_losses = 0
         self.open_positions = set()
+        self.pos_data = {}          # хранит данные активных позиций
         self.all_symbols = []
         self.signal_state = {}
 
@@ -50,6 +51,14 @@ class TradingBot:
             return base
         return base * (2 ** self.consecutive_losses)
 
+    async def set_leverage(self, symbol, leverage, side):
+        """Установка плеча с указанием стороны (LONG/SHORT)"""
+        try:
+            await self.exchange.set_leverage(leverage, symbol, params={'side': side})
+            logger.info(f"Плечо {leverage}x для {symbol} ({side})")
+        except Exception as e:
+            logger.error(f"Ошибка установки плеча {symbol}: {e}")
+
     async def open_position(self, symbol, direction, price):
         if len(self.open_positions) >= self.config['max_positions']:
             logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут, пропускаем {symbol}")
@@ -58,54 +67,102 @@ class TradingBot:
             leverage = self.config['trade_params']['default_leverage']
             trade_amount = self.get_trade_amount()
             side = 'LONG' if direction == 'LONG' else 'SHORT'
+            # Устанавливаем плечо перед открытием
+            await self.set_leverage(symbol, leverage, side)
+
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
                 logger.error(f"Неверное количество {symbol}: {quantity}")
                 return
 
-            risk_percent = self.config['trade_params']['risk_percent']
-            if direction == 'LONG':
-                stop_price = round(price * (1 - (1/leverage) * risk_percent), 5)
-                take_price = round(price * (1 + (1/leverage) * risk_percent), 5)
-            else:
-                stop_price = round(price * (1 + (1/leverage) * risk_percent), 5)
-                take_price = round(price * (1 - (1/leverage) * risk_percent), 5)
-
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            # Отправляем ордер с параметрами плеча, TP/SL
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=order_side,
                 amount=quantity,
-                params={
-                    'positionSide': side,
-                    'leverage': leverage,
-                    'stopLossPrice': stop_price,
-                    'takeProfitPrice': take_price
-                }
+                params={'positionSide': side}
             )
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
-            logger.info(f"Стоп-лосс: {stop_price}, тейк-профит: {take_price}")
+
+            # Рассчитываем уровни стопа и тейка
+            risk_percent = self.config['trade_params']['risk_percent']
+            if direction == 'LONG':
+                stop_price = price * (1 - (1/leverage) * risk_percent)
+                take_price = price * (1 + (1/leverage) * risk_percent)
+            else:
+                stop_price = price * (1 + (1/leverage) * risk_percent)
+                take_price = price * (1 - (1/leverage) * risk_percent)
+
+            # Сохраняем данные для мониторинга
             self.open_positions.add(symbol)
+            self.pos_data[symbol] = {
+                'direction': direction,
+                'entry_price': price,
+                'quantity': quantity,
+                'stop_price': stop_price,
+                'take_price': take_price,
+                'trade_amount': trade_amount,
+                'leverage': leverage
+            }
+            logger.info(f"Стоп-лосс: {stop_price:.5f}, тейк-профит: {take_price:.5f}")
+
             if symbol in self.signal_state:
                 self.signal_state[symbol]['waiting_for_pullback'] = False
         except Exception as e:
             logger.error(f"Ошибка открытия {symbol}: {e}")
 
+    async def close_position(self, symbol, reason, current_price):
+        pos = self.pos_data[symbol]
+        try:
+            close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
+            await self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=close_side,
+                amount=pos['quantity'],
+                params={'reduceOnly': True, 'positionSide': 'LONG' if pos['direction'] == 'LONG' else 'SHORT'}
+            )
+            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
+            if reason == 'stop_loss':
+                self.consecutive_losses += 1
+                logger.warning(f"Убытков подряд: {self.consecutive_losses}")
+            else:  # take_profit
+                self.consecutive_losses = 0
+                logger.info(f"Тейк-профит, мартингейл сброшен")
+            self.open_positions.discard(symbol)
+            del self.pos_data[symbol]
+        except Exception as e:
+            logger.error(f"Ошибка закрытия {symbol}: {e}")
+
     async def monitor_positions(self):
+        """Фоновая задача: отслеживает цену и закрывает позиции при достижении стопа или тейка"""
         while True:
-            try:
-                positions = await self.exchange.fetch_positions()
-                open_on_exchange = {pos['symbol'] for pos in positions if float(pos['contracts']) > 0}
-                closed = self.open_positions - open_on_exchange
-                for symbol in closed:
-                    self.consecutive_losses += 1
-                    logger.warning(f"Позиция {symbol} закрыта, убытков подряд: {self.consecutive_losses}")
-                    self.open_positions.discard(symbol)
-            except Exception as e:
-                logger.error(f"Ошибка мониторинга: {e}")
-            await asyncio.sleep(15)
+            for symbol, pos in list(self.pos_data.items()):
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    should_close = False
+                    reason = None
+                    if pos['direction'] == 'LONG':
+                        if current_price <= pos['stop_price']:
+                            should_close = True
+                            reason = 'stop_loss'
+                        elif current_price >= pos['take_price']:
+                            should_close = True
+                            reason = 'take_profit'
+                    else:
+                        if current_price >= pos['stop_price']:
+                            should_close = True
+                            reason = 'stop_loss'
+                        elif current_price <= pos['take_price']:
+                            should_close = True
+                            reason = 'take_profit'
+                    if should_close:
+                        await self.close_position(symbol, reason, current_price)
+                except Exception as e:
+                    logger.error(f"Ошибка мониторинга {symbol}: {e}")
+            await asyncio.sleep(5)
 
     def calculate_heiken_ashi(self, df):
         df = df.copy()
