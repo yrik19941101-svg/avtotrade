@@ -2,15 +2,15 @@
     "telegram_token": "ВСТАВЬТЕ_НОВЫЙ_ТОКЕН_TELEGRAM",
     "telegram_chat_id": "354290076",
     "exchange": "bingx",
-    "timeframe": "4h",
+    "timeframe": "1h",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
     "max_positions": 10,
     "trade_params": {
         "default_leverage": 20,
-        "default_trade_amount": 5,
+        "fixed_trade_amount": 4,
         "max_martingale_steps": 3,
-        "risk_percent": 0.5,
+        "risk_percent": 0.25,
         "min_pullback_percent": 0.1
     }
 }
