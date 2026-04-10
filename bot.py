@@ -50,6 +50,14 @@ class TradingBot:
             return base
         return base * (2 ** self.consecutive_losses)
 
+    async def set_leverage(self, symbol, leverage, side):
+        """side = 'LONG' или 'SHORT'"""
+        try:
+            await self.exchange.set_leverage(leverage, symbol, params={'side': side})
+            logger.info(f"Плечо {leverage}x установлено для {symbol} ({side})")
+        except Exception as e:
+            logger.error(f"Ошибка установки плеча для {symbol}: {e}")
+
     async def open_position(self, symbol, direction, price):
         if len(self.open_positions) >= self.config['max_positions']:
             logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут, пропускаем {symbol}")
@@ -57,12 +65,15 @@ class TradingBot:
         try:
             leverage = self.config['trade_params']['default_leverage']
             trade_amount = self.get_trade_amount()
-            position_side = 'LONG' if direction == 'LONG' else 'SHORT'
-            await self.exchange.set_leverage(leverage, symbol, params={'positionSide': position_side})
+            side = 'LONG' if direction == 'LONG' else 'SHORT'
+            # Устанавливаем плечо с указанием стороны
+            await self.set_leverage(symbol, leverage, side)
+
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
                 logger.error(f"Неверное количество {symbol}: {quantity}")
                 return
+
             risk_percent = self.config['trade_params']['risk_percent']
             if direction == 'LONG':
                 stop_price = round(price * (1 - (1/leverage) * risk_percent), 5)
@@ -70,14 +81,16 @@ class TradingBot:
             else:
                 stop_price = round(price * (1 + (1/leverage) * risk_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * risk_percent), 5)
+
             order_side = 'buy' if direction == 'LONG' else 'sell'
+            # Отправляем ордер с TP/SL (параметры для BingX)
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=order_side,
                 amount=quantity,
                 params={
-                    'positionSide': position_side,
+                    'positionSide': side,
                     'stopLossPrice': stop_price,
                     'takeProfitPrice': take_price
                 }
