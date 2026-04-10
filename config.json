@@ -8,9 +8,9 @@
     "max_positions": 10,
     "trade_params": {
         "default_leverage": 20,
-        "fixed_trade_amount": 4,
+        "fixed_trade_amount": 7,
         "max_martingale_steps": 3,
-        "risk_percent": 0.25,
+        "risk_percent": 0.15,
         "min_pullback_percent": 0.1
     }
 }
