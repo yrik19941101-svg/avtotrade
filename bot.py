@@ -4,6 +4,7 @@ import ccxt.async_support as ccxt
 import pandas as pd
 import json
 from datetime import datetime
+from telegram import Bot
 
 CONFIG_FILE = "config.json"
 
@@ -31,6 +32,13 @@ class TradingBot:
         self.pos_data = {}
         self.all_symbols = []
         self.signal_state = {}
+        self.telegram_bot = Bot(token=config["telegram_token"])
+
+    async def send_telegram(self, message):
+        try:
+            await self.telegram_bot.send_message(chat_id=self.config["telegram_chat_id"], text=message, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Ошибка отправки Telegram: {e}")
 
     async def load_markets(self):
         await self.exchange.load_markets()
@@ -112,9 +120,21 @@ class TradingBot:
                 'take_price': take_price,
                 'trade_amount': trade_amount,
                 'leverage': leverage,
+                'closed': False
             }
             logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
             logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
+
+            emoji = "🟢" if direction == 'LONG' else "🔴"
+            msg = (f"{emoji} **ОТКРЫТА СДЕЛКА {direction}**\n"
+                   f"Монета: {symbol}\n"
+                   f"Цена: {price:.5f}\n"
+                   f"Сумма: {trade_amount:.2f} USDT\n"
+                   f"Плечо: {leverage}x\n"
+                   f"Стоп-лосс: {stop_price:.5f} (SL {sl_percent*100:.0f}%)\n"
+                   f"Тейк-профит: {take_price:.5f} (TP {tp_percent*100:.0f}%)\n"
+                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            await self.send_telegram(msg)
 
             if symbol in self.signal_state:
                 self.signal_state[symbol]['waiting_for_pullback'] = False
@@ -123,34 +143,55 @@ class TradingBot:
 
     async def close_position(self, symbol, reason, current_price):
         pos = self.pos_data.get(symbol)
-        if not pos:
+        if not pos or pos.get('closed', False):
             return
         try:
             close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
             side = 'LONG' if pos['direction'] == 'LONG' else 'SHORT'
-            # Убираем 'reduceOnly', оставляем только 'positionSide'
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=close_side,
                 amount=pos['quantity'],
-                params={'positionSide': side}
+                params={'reduceOnly': True, 'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
+            self.pos_data[symbol]['closed'] = True
+
+            emoji = "🔴" if reason == 'stop_loss' else "🟢"
+            msg = (f"{emoji} **СДЕЛКА ЗАКРЫТА**\n"
+                   f"Монета: {symbol}\n"
+                   f"Причина: {reason}\n"
+                   f"Цена закрытия: {current_price:.5f}\n"
+                   f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            await self.send_telegram(msg)
+
             if reason == 'stop_loss':
                 self.consecutive_losses += 1
                 logger.warning(f"Убытков подряд: {self.consecutive_losses}")
+                msg_loss = f"⚠️ **СТОП-ЛОСС**\nУбытков подряд: {self.consecutive_losses}\nСледующая сделка будет с суммой {self.get_trade_amount():.2f} USDT"
+                await self.send_telegram(msg_loss)
             else:
                 self.consecutive_losses = 0
                 logger.info(f"Тейк-профит, мартингейл сброшен")
+                msg_tp = f"✅ **ТЕЙК-ПРОФИТ**\nМартингейл сброшен. Следующая сделка {self.get_trade_amount():.2f} USDT"
+                await self.send_telegram(msg_tp)
+
             self.open_positions.discard(symbol)
-            del self.pos_data[symbol]
+            asyncio.create_task(self.delayed_cleanup(symbol))
         except Exception as e:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
+
+    async def delayed_cleanup(self, symbol):
+        await asyncio.sleep(10)
+        if symbol in self.pos_data:
+            del self.pos_data[symbol]
 
     async def monitor_positions(self):
         while True:
             for symbol, pos in list(self.pos_data.items()):
+                if pos.get('closed', False):
+                    continue
                 try:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     current_price = ticker['last']
@@ -204,7 +245,6 @@ class TradingBot:
         logger.info(f"🔍 Проверяю монету: {symbol}")
         df = await self.get_market_data(symbol, limit=50)
         if df is None or len(df) < 20:
-            logger.debug(f"Недостаточно данных для {symbol}")
             return
         df = self.calculate_heiken_ashi(df)
         current_ts = df['timestamp'].iloc[-1]
@@ -256,6 +296,7 @@ class TradingBot:
         await self.load_markets()
         asyncio.create_task(self.monitor_positions())
         logger.info("✅ Бот запущен, ожидание сигналов...")
+        await self.send_telegram("🚀 **Бот запущен**\nТаймфрейм: 30 минут\nСумма сделки: 7 USDT\nSL: 15%, TP: 20%\nМартингейл: до 3 шагов")
         while True:
             for symbol in self.all_symbols:
                 try:
