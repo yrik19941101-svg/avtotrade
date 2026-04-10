@@ -28,13 +28,22 @@ class TradingBot:
         })
         self.state = {}
         self.open_positions = {}
+        self.all_symbols = []
 
     async def load_markets(self):
         await self.exchange.load_markets()
         logger.info("Рынки загружены")
+        # Фильтруем только фьючерсные USDT пары
+        all_swap = [s for s, m in self.exchange.markets.items() if m['swap'] and m['quote'] == 'USDT']
+        # Если заданы символы в конфиге, используем пересечение
+        configured = self.config['symbols']
+        self.all_symbols = [s for s in configured if s in all_swap]
+        if not self.all_symbols:
+            # fallback: все swap USDT пары
+            self.all_symbols = all_swap
+        logger.info(f"Отобрано {len(self.all_symbols)} доступных символов")
 
     async def load_symbols(self):
-        self.all_symbols = self.config['symbols']
         logger.info(f"✅ Бот запущен на BingX")
         logger.info(f"Таймфрейм: {self.config['timeframe']}")
         logger.info(f"Мониторинг: {len(self.all_symbols)} монет")
@@ -56,7 +65,6 @@ class TradingBot:
 
     async def set_leverage(self, symbol, leverage, position_side):
         try:
-            # Для BingX в хедж-режиме нужно указывать positionSide
             await self.exchange.set_leverage(leverage, symbol, params={'positionSide': position_side})
             logger.info(f"Плечо {leverage}x для {symbol} ({position_side})")
         except Exception as e:
@@ -75,7 +83,6 @@ class TradingBot:
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            # Добавляем positionSide в параметры ордера
             order = await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
