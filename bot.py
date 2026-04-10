@@ -2,7 +2,6 @@ import asyncio
 import logging
 import ccxt.async_support as ccxt
 import pandas as pd
-from telegram import Bot
 import json
 from datetime import datetime
 
@@ -22,27 +21,27 @@ class TradingBot:
             'enableRateLimit': True,
             'apiKey': config['api_key'],
             'secret': config['api_secret'],
-            'options': {'defaultType': 'swap'}
+            'options': {
+                'defaultType': 'swap',
+                'adjustForTimeDifference': True
+            }
         })
-        self.state = {}          # для хранения мартингейл-шага по каждой монете
-        self.open_positions = {} # открытые позиции
+        self.state = {}
+        self.open_positions = {}
 
     async def load_symbols(self):
         self.all_symbols = self.config['symbols']
-        bot = Bot(token=self.config["telegram_token"])
-        await bot.send_message(
-            chat_id=self.config["telegram_chat_id"],
-            text=f"✅ Автоторговый бот запущен на BingX\n"
-                 f"Таймфрейм: {self.config['timeframe']}\n"
-                 f"Мониторинг: {len(self.all_symbols)} монет\n"
-                 f"Начальная сумма сделки: ${self.config['trade_params']['default_trade_amount']}\n"
-                 f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов",
-            parse_mode='Markdown'
-        )
+        logger.info(f"✅ Автоторговый бот запущен на BingX")
+        logger.info(f"Таймфрейм: {self.config['timeframe']}")
+        logger.info(f"Мониторинг: {len(self.all_symbols)} монет")
+        logger.info(f"Начальная сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
+        logger.info(f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов")
+        logger.info(f"Плечо: {self.config['trade_params']['default_leverage']}x")
+        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}% от суммы сделки")
 
     def get_leverage(self, symbol):
-        per_coin = self.config.get('per_coin_leverage', {})
-        return per_coin.get(symbol, self.config['trade_params']['default_leverage'])
+        # единое плечо для всех пар
+        return self.config['trade_params']['default_leverage']
 
     def get_trade_amount(self, symbol):
         step = self.state.get(symbol, {}).get('martingale_step', 0)
@@ -52,39 +51,45 @@ class TradingBot:
             return base
         return base * (2 ** step)
 
-    async def set_leverage(self, symbol, leverage):
+    async def set_leverage(self, symbol, leverage, side):
+        """Устанавливает плечо для конкретной стороны (LONG или SHORT)"""
         try:
-            await self.exchange.set_leverage(leverage, symbol)
-            logger.info(f"Плечо {leverage}x установлено для {symbol}")
+            await self.exchange.set_leverage(leverage, symbol, params={'side': side})
+            logger.info(f"Плечо {leverage}x установлено для {symbol} ({side})")
         except Exception as e:
-            logger.error(f"Ошибка установки плеча для {symbol}: {e}")
+            logger.error(f"Ошибка установки плеча для {symbol} ({side}): {e}")
 
     async def open_position(self, symbol, direction, price):
         try:
             leverage = self.get_leverage(symbol)
-            await self.set_leverage(symbol, leverage)
             trade_amount = self.get_trade_amount(symbol)
-            # Количество = (сумма * плечо) / цена
+            side = 'LONG' if direction == 'LONG' else 'SHORT'
+            await self.set_leverage(symbol, leverage, side)
+
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
                 logger.error(f"Неверное количество для {symbol}: {quantity}")
                 return
-            side = 'buy' if direction == 'LONG' else 'sell'
-            order = await self.exchange.create_order(
+
+            order_side = 'buy' if direction == 'LONG' else 'sell'
+            await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
-                side=side,
+                side=order_side,
                 amount=quantity,
                 params={'reduceOnly': False}
             )
-            logger.info(f"Ордер {direction} для {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
-            # Рассчитываем стоп-лосс и тейк-профит (100% от суммы сделки)
+            logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
+
+            risk_percent = self.config['trade_params']['risk_percent']
+            # Расчёт стоп-лосс и тейк-профит с учётом риска 50% от суммы сделки
             if direction == 'LONG':
-                stop_price = price * (1 - 1/leverage)
-                take_price = price * (1 + 1/leverage)
+                stop_price = price * (1 - (1/leverage) * risk_percent)
+                take_price = price * (1 + (1/leverage) * risk_percent)
             else:
-                stop_price = price * (1 + 1/leverage)
-                take_price = price * (1 - 1/leverage)
+                stop_price = price * (1 + (1/leverage) * risk_percent)
+                take_price = price * (1 - (1/leverage) * risk_percent)
+
             self.open_positions[symbol] = {
                 'direction': direction,
                 'entry_price': price,
@@ -95,21 +100,8 @@ class TradingBot:
                 'take_price': take_price,
                 'timestamp': datetime.now()
             }
-            # Уведомление в Telegram
-            bot = Bot(token=self.config["telegram_token"])
-            emoji = "🟢" if direction == 'LONG' else "🔴"
-            direction_ru = "ПОКУПКА" if direction == 'LONG' else "ПРОДАЖА"
-            message = (
-                f"{emoji} **АВТО-СДЕЛКА {direction_ru}**\n\n"
-                f"Монета: {symbol}\n"
-                f"Цена входа: `{price:.5f}`\n"
-                f"Сумма: {trade_amount} USDT\n"
-                f"Плечо: {leverage}x\n"
-                f"Стоп-лосс: `{stop_price:.5f}`\n"
-                f"Тейк-профит: `{take_price:.5f}`\n"
-                f"Время: {datetime.now().strftime('%H:%M:%S')}"
-            )
-            await bot.send_message(chat_id=self.config["telegram_chat_id"], text=message, parse_mode='Markdown')
+            logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
+            logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
         except Exception as e:
             logger.error(f"Ошибка открытия позиции для {symbol}: {e}")
 
@@ -123,23 +115,16 @@ class TradingBot:
                 side=close_side,
                 amount=pos['quantity']
             )
-            logger.info(f"Закрыта позиция {symbol} по {reason}, цена {current_price}")
-            # Обновляем мартингейл
+            logger.info(f"🔴 ЗАКРЫТА позиция {symbol} по {reason}, цена {current_price}")
             if reason == 'stop_loss':
                 step = self.state.get(symbol, {}).get('martingale_step', 0) + 1
                 self.state.setdefault(symbol, {})['martingale_step'] = step
                 logger.info(f"{symbol}: стоп-лосс, шаг мартингейла = {step}")
-            else:  # take_profit
+            else:
                 if symbol in self.state:
                     self.state[symbol]['martingale_step'] = 0
                 logger.info(f"{symbol}: тейк-профит, мартингейл сброшен")
-            # Удаляем позицию
             del self.open_positions[symbol]
-            # Уведомление в Telegram
-            bot = Bot(token=self.config["telegram_token"])
-            emoji = "🔴" if reason == 'stop_loss' else "🟢"
-            text = f"{emoji} **ПОЗИЦИЯ ЗАКРЫТА**\nМонета: {symbol}\nПричина: {reason}\nЦена закрытия: {current_price:.5f}\nВремя: {datetime.now().strftime('%H:%M:%S')}"
-            await bot.send_message(chat_id=self.config["telegram_chat_id"], text=text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
 
@@ -158,7 +143,7 @@ class TradingBot:
                         elif current_price >= pos['take_price']:
                             should_close = True
                             reason = 'take_profit'
-                    else:  # SHORT
+                    else:
                         if current_price >= pos['stop_price']:
                             should_close = True
                             reason = 'stop_loss'
@@ -194,7 +179,6 @@ class TradingBot:
             return None
 
     async def process_symbol(self, symbol):
-        # Если есть открытая позиция по этой монете, не ищем новые сигналы
         if symbol in self.open_positions:
             return
         df = await self.get_market_data(symbol, limit=30)
