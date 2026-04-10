@@ -46,7 +46,6 @@ class TradingBot:
         logger.info(f"Минимальный откат: {self.config['trade_params']['min_pullback_percent']}%")
 
     def get_trade_amount(self):
-        """Фиксированная сумма с мартингейлом (без процента от баланса)"""
         base = self.config['trade_params']['fixed_trade_amount']
         step = self.consecutive_losses
         max_step = self.config['trade_params']['max_martingale_steps']
