@@ -28,7 +28,7 @@ class TradingBot:
         })
         self.consecutive_losses = 0
         self.open_positions = set()
-        self.pos_data = {}          # хранит данные позиций для мониторинга
+        self.pos_data = {}
         self.all_symbols = []
         self.signal_state = {}
 
@@ -40,16 +40,22 @@ class TradingBot:
         logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
         logger.info(f"Максимум позиций: {self.config['max_positions']}, таймфрейм: {self.config['timeframe']}")
         logger.info(f"Плечо: {self.config['trade_params']['default_leverage']}x")
-        logger.info(f"Начальная сумма: ${self.config['trade_params']['default_trade_amount']}")
-        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}%")
+        logger.info(f"Фиксированная сумма сделки: ${self.config['trade_params']['fixed_trade_amount']}")
+        logger.info(f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов")
+        logger.info(f"Стоп-лосс/тейк-профит: {self.config['trade_params']['risk_percent']*100}% от суммы сделки")
         logger.info(f"Минимальный откат: {self.config['trade_params']['min_pullback_percent']}%")
 
     def get_trade_amount(self):
-        base = self.config['trade_params']['default_trade_amount']
+        """Фиксированная сумма с мартингейлом (без процента от баланса)"""
+        base = self.config['trade_params']['fixed_trade_amount']
+        step = self.consecutive_losses
         max_step = self.config['trade_params']['max_martingale_steps']
-        if self.consecutive_losses >= max_step:
-            return base
-        return base * (2 ** self.consecutive_losses)
+        if step > max_step:
+            step = max_step
+        multiplier = 2 ** step
+        amount = base * multiplier
+        logger.info(f"Шаг мартингейла: {step}, сумма сделки: {amount:.2f} USDT")
+        return amount
 
     async def set_leverage(self, symbol, leverage, side):
         try:
@@ -62,9 +68,14 @@ class TradingBot:
         if len(self.open_positions) >= self.config['max_positions']:
             logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут, пропускаем {symbol}")
             return
+
+        trade_amount = self.get_trade_amount()
+        if trade_amount <= 0:
+            logger.error("Сумма сделки слишком мала")
+            return
+
         try:
             leverage = self.config['trade_params']['default_leverage']
-            trade_amount = self.get_trade_amount()
             side = 'LONG' if direction == 'LONG' else 'SHORT'
             await self.set_leverage(symbol, leverage, side)
 
@@ -74,17 +85,15 @@ class TradingBot:
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            # Открываем рыночную позицию
-            order = await self.exchange.create_order(
+            await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=order_side,
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
+            logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT, плечо {leverage}")
 
-            # Рассчитываем уровни стопа и тейка (в процентах от цены)
             risk_percent = self.config['trade_params']['risk_percent']
             if direction == 'LONG':
                 stop_price = round(price * (1 - (1/leverage) * risk_percent), 5)
@@ -93,7 +102,6 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * risk_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * risk_percent), 5)
 
-            # Сохраняем данные для мониторинга
             self.open_positions.add(symbol)
             self.pos_data[symbol] = {
                 'direction': direction,
@@ -103,59 +111,17 @@ class TradingBot:
                 'take_price': take_price,
                 'trade_amount': trade_amount,
                 'leverage': leverage,
-                'order_id': order['id']
+                'order_id': None
             }
-            logger.info(f"Стоп-лосс: {stop_price:.5f}, тейк-профит: {take_price:.5f}")
-
-            # Отдельно выставляем стоп-лосс и тейк-профит ордера (условные)
-            await self.place_stop_loss(symbol, direction, quantity, stop_price)
-            await self.place_take_profit(symbol, direction, quantity, take_price)
+            logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
+            logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
 
             if symbol in self.signal_state:
                 self.signal_state[symbol]['waiting_for_pullback'] = False
         except Exception as e:
             logger.error(f"Ошибка открытия {symbol}: {e}")
 
-    async def place_stop_loss(self, symbol, direction, quantity, stop_price):
-        """Выставляет стоп-лосс ордер (stop market)"""
-        try:
-            side = 'sell' if direction == 'LONG' else 'buy'
-            await self.exchange.create_order(
-                symbol=symbol,
-                type='stop_market',
-                side=side,
-                amount=quantity,
-                params={
-                    'stopPrice': stop_price,
-                    'positionSide': 'LONG' if direction == 'LONG' else 'SHORT',
-                    'reduceOnly': True
-                }
-            )
-            logger.info(f"✅ Стоп-лосс {stop_price} установлен для {symbol}")
-        except Exception as e:
-            logger.error(f"Ошибка установки стоп-лосса для {symbol}: {e}")
-
-    async def place_take_profit(self, symbol, direction, quantity, take_price):
-        """Выставляет тейк-профит ордер (take profit market)"""
-        try:
-            side = 'sell' if direction == 'LONG' else 'buy'
-            await self.exchange.create_order(
-                symbol=symbol,
-                type='take_profit_market',
-                side=side,
-                amount=quantity,
-                params={
-                    'stopPrice': take_price,
-                    'positionSide': 'LONG' if direction == 'LONG' else 'SHORT',
-                    'reduceOnly': True
-                }
-            )
-            logger.info(f"✅ Тейк-профит {take_price} установлен для {symbol}")
-        except Exception as e:
-            logger.error(f"Ошибка установки тейк-профита для {symbol}: {e}")
-
     async def close_position(self, symbol, reason, current_price):
-        # Этот метод остаётся на случай, если что-то пойдёт не так с условными ордерами
         pos = self.pos_data.get(symbol)
         if not pos:
             return
@@ -181,7 +147,6 @@ class TradingBot:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
 
     async def monitor_positions(self):
-        """Фоновая задача для контроля (на случай, если условные ордера не сработали)"""
         while True:
             for symbol, pos in list(self.pos_data.items()):
                 try:
@@ -207,7 +172,7 @@ class TradingBot:
                         await self.close_position(symbol, reason, current_price)
                 except Exception as e:
                     logger.error(f"Ошибка мониторинга {symbol}: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
 
     def calculate_heiken_ashi(self, df):
         df = df.copy()
@@ -249,10 +214,8 @@ class TradingBot:
             }
         state = self.signal_state[symbol]
 
-        # Новая свеча закрылась
         if current_ts != state['last_candle_ts']:
             state['last_candle_ts'] = current_ts
-            # Проверяем смену цвета на закрытой свече (индекс -2) и предыдущей (-3)
             prev2 = df['ha_color'].iloc[-3]
             prev1 = df['ha_color'].iloc[-2]
             signal_candle = df.iloc[-2]
@@ -260,23 +223,21 @@ class TradingBot:
                 state['waiting_for_pullback'] = True
                 state['signal_direction'] = 'LONG'
                 state['signal_candle_close'] = signal_candle['close']
-                logger.info(f"{symbol}: сигнал LONG (закрылась зелёная), ждём отката вниз")
+                logger.info(f"{symbol}: сигнал LONG, ждём отката вниз")
             elif prev2 == 'green' and prev1 == 'red':
                 state['waiting_for_pullback'] = True
                 state['signal_direction'] = 'SHORT'
                 state['signal_candle_close'] = signal_candle['close']
-                logger.info(f"{symbol}: сигнал SHORT (закрылась красная), ждём отката вверх")
+                logger.info(f"{symbol}: сигнал SHORT, ждём отката вверх")
             else:
                 state['waiting_for_pullback'] = False
                 state['signal_direction'] = None
 
-        # Если ждём отката, проверяем текущую свечу
         if state['waiting_for_pullback']:
             current_candle = df.iloc[-1]
             current_ha_open = df['ha_open'].iloc[-1]
             min_pullback = self.config['trade_params']['min_pullback_percent'] / 100.0
             if state['signal_direction'] == 'LONG':
-                # Откат вниз: цена должна опуститься ниже HA_Open и ниже закрытия сигнальной свечи на min_pullback%
                 target_low = min(current_ha_open, state['signal_candle_close']) * (1 - min_pullback)
                 if current_candle['low'] <= target_low:
                     await self.open_position(symbol, 'LONG', current_candle['close'])
