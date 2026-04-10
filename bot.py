@@ -145,38 +145,32 @@ class TradingBot:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
 
     async def monitor_positions(self):
-        """Проверяет текущую цену и закрывает позиции при достижении стоп-лосс или тейк-профит"""
         while True:
-            try:
-                # Получаем список всех позиций с биржи (на всякий случай)
-                # Но мы будем использовать свои данные
-                for symbol, pos in list(self.pos_data.items()):
-                    try:
-                        ticker = await self.exchange.fetch_ticker(symbol)
-                        current_price = ticker['last']
-                        should_close = False
-                        reason = None
-                        if pos['direction'] == 'LONG':
-                            if current_price <= pos['stop_price']:
-                                should_close = True
-                                reason = 'stop_loss'
-                            elif current_price >= pos['take_price']:
-                                should_close = True
-                                reason = 'take_profit'
-                        else:
-                            if current_price >= pos['stop_price']:
-                                should_close = True
-                                reason = 'stop_loss'
-                            elif current_price <= pos['take_price']:
-                                should_close = True
-                                reason = 'take_profit'
-                        if should_close:
-                            await self.close_position(symbol, reason, current_price)
-                    except Exception as e:
-                        logger.error(f"Ошибка проверки {symbol}: {e}")
-            except Exception as e:
-                logger.error(f"Ошибка в monitor_positions: {e}")
-            await asyncio.sleep(2)  # Проверяем каждые 2 секунды
+            for symbol, pos in list(self.pos_data.items()):
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    should_close = False
+                    reason = None
+                    if pos['direction'] == 'LONG':
+                        if current_price <= pos['stop_price']:
+                            should_close = True
+                            reason = 'stop_loss'
+                        elif current_price >= pos['take_price']:
+                            should_close = True
+                            reason = 'take_profit'
+                    else:
+                        if current_price >= pos['stop_price']:
+                            should_close = True
+                            reason = 'stop_loss'
+                        elif current_price <= pos['take_price']:
+                            should_close = True
+                            reason = 'take_profit'
+                    if should_close:
+                        await self.close_position(symbol, reason, current_price)
+                except Exception as e:
+                    logger.error(f"Ошибка мониторинга {symbol}: {e}")
+            await asyncio.sleep(2)
 
     def calculate_heiken_ashi(self, df):
         df = df.copy()
