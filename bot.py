@@ -125,12 +125,14 @@ class TradingBot:
             return
         try:
             close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
+            position_side = 'LONG' if pos['direction'] == 'LONG' else 'SHORT'
+            # В Hedge режиме не используем reduceOnly, только positionSide
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=close_side,
                 amount=pos['quantity'],
-                params={'reduceOnly': True, 'positionSide': 'LONG' if pos['direction'] == 'LONG' else 'SHORT'}
+                params={'positionSide': position_side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             if reason == 'stop_loss':
