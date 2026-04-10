@@ -50,14 +50,6 @@ class TradingBot:
             return base
         return base * (2 ** self.consecutive_losses)
 
-    async def set_leverage(self, symbol, leverage, side):
-        """side = 'LONG' или 'SHORT'"""
-        try:
-            await self.exchange.set_leverage(leverage, symbol, params={'side': side})
-            logger.info(f"Плечо {leverage}x установлено для {symbol} ({side})")
-        except Exception as e:
-            logger.error(f"Ошибка установки плеча для {symbol}: {e}")
-
     async def open_position(self, symbol, direction, price):
         if len(self.open_positions) >= self.config['max_positions']:
             logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут, пропускаем {symbol}")
@@ -66,9 +58,6 @@ class TradingBot:
             leverage = self.config['trade_params']['default_leverage']
             trade_amount = self.get_trade_amount()
             side = 'LONG' if direction == 'LONG' else 'SHORT'
-            # Устанавливаем плечо с указанием стороны
-            await self.set_leverage(symbol, leverage, side)
-
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
                 logger.error(f"Неверное количество {symbol}: {quantity}")
@@ -83,7 +72,7 @@ class TradingBot:
                 take_price = round(price * (1 - (1/leverage) * risk_percent), 5)
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            # Отправляем ордер с TP/SL (параметры для BingX)
+            # Отправляем ордер с параметрами плеча, TP/SL
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -91,6 +80,7 @@ class TradingBot:
                 amount=quantity,
                 params={
                     'positionSide': side,
+                    'leverage': leverage,
                     'stopLossPrice': stop_price,
                     'takeProfitPrice': take_price
                 }
