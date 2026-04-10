@@ -26,61 +26,60 @@ class TradingBot:
                 'adjustForTimeDifference': True
             }
         })
-        self.state = {}
-        self.open_positions = {}
+        self.open_positions = {}      # активные позиции по символам
+        self.martingale_step = 0      # глобальный шаг мартингейла (0,1,2,3)
+        self.total_losses = 0         # количество последовательных убытков
+        self.signal_sent = {}         # флаг отправки сигнала на текущей свече для каждого символа
 
-    async def load_markets_and_symbols(self):
-        # Загружаем рынки
+    async def load_markets(self):
         await self.exchange.load_markets()
-        logger.info("Рынки загружены")
-        # Фильтруем только USDT-фьючерсы (swap)
-        all_symbols = [s for s in self.exchange.markets if self.exchange.markets[s]['swap'] and s.endswith('/USDT:USDT')]
-        # Если в конфиге есть список symbols, используем его, иначе все найденные
-        if 'symbols' in self.config and self.config['symbols']:
-            self.all_symbols = [s for s in self.config['symbols'] if s in all_symbols]
-            logger.info(f"Используем указанные символы: {len(self.all_symbols)}")
-        else:
-            self.all_symbols = all_symbols
-            logger.info(f"Загружено {len(self.all_symbols)} USDT-фьючерсов")
-        logger.info(f"✅ Бот запущен на BingX")
-        logger.info(f"Таймфрейм: {self.config['timeframe']}")
-        logger.info(f"Сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
+        # Получаем все фьючерсные USDT пары
+        all_swap = [symbol for symbol, market in self.exchange.markets.items()
+                    if market['swap'] and market['quote'] == 'USDT']
+        self.all_symbols = all_swap[:50]  # ограничим 50 парами
+        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
+        logger.info(f"Максимум открытых позиций: {self.config['max_positions']}")
+        logger.info(f"Начальная сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
         logger.info(f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов")
         logger.info(f"Плечо: {self.config['trade_params']['default_leverage']}x")
-        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}% от суммы сделки")
+        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}%")
 
-    def get_leverage(self, symbol):
-        return self.config['trade_params']['default_leverage']
-
-    def get_trade_amount(self, symbol):
-        step = self.state.get(symbol, {}).get('martingale_step', 0)
+    def get_trade_amount(self):
+        """Глобальный размер сделки в зависимости от текущего шага мартингейла"""
         base = self.config['trade_params']['default_trade_amount']
         max_step = self.config['trade_params']['max_martingale_steps']
-        if step >= max_step:
+        if self.martingale_step >= max_step:
             return base
-        return base * (2 ** step)
+        return base * (2 ** self.martingale_step)
+
+    def get_leverage(self):
+        return self.config['trade_params']['default_leverage']
 
     async def set_leverage(self, symbol, leverage, position_side):
         try:
             await self.exchange.set_leverage(leverage, symbol, params={'positionSide': position_side})
             logger.info(f"Плечо {leverage}x для {symbol} ({position_side})")
         except Exception as e:
-            logger.error(f"Ошибка установки плеча для {symbol}: {e}")
+            logger.error(f"Ошибка установки плеча {symbol}: {e}")
 
     async def open_position(self, symbol, direction, price):
+        if len(self.open_positions) >= self.config['max_positions']:
+            logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут. Позиция для {symbol} не открыта.")
+            return
+
         try:
-            leverage = self.get_leverage(symbol)
-            trade_amount = self.get_trade_amount(symbol)
+            leverage = self.get_leverage()
+            trade_amount = self.get_trade_amount()
             position_side = 'LONG' if direction == 'LONG' else 'SHORT'
             await self.set_leverage(symbol, leverage, position_side)
 
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
-                logger.error(f"Неверное количество для {symbol}: {quantity}")
+                logger.error(f"Неверное количество {symbol}: {quantity}")
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
-            order = await self.exchange.create_order(
+            await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=order_side,
@@ -90,7 +89,6 @@ class TradingBot:
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
 
             risk_percent = self.config['trade_params']['risk_percent']
-            # Для плеча 20, риск 50% => изменение цены = (1/20)*0.5 = 2.5%
             if direction == 'LONG':
                 stop_price = price * (1 - (1/leverage) * risk_percent)
                 take_price = price * (1 + (1/leverage) * risk_percent)
@@ -111,7 +109,7 @@ class TradingBot:
             logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
             logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
         except Exception as e:
-            logger.error(f"Ошибка открытия позиции для {symbol}: {e}")
+            logger.error(f"Ошибка открытия {symbol}: {e}")
 
     async def close_position(self, symbol, reason, current_price):
         pos = self.open_positions[symbol]
@@ -123,18 +121,18 @@ class TradingBot:
                 side=close_side,
                 amount=pos['quantity']
             )
-            logger.info(f"🔴 ЗАКРЫТА позиция {symbol} по {reason}, цена {current_price}")
+            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
+            # Обновляем глобальный мартингейл
             if reason == 'stop_loss':
-                step = self.state.get(symbol, {}).get('martingale_step', 0) + 1
-                self.state.setdefault(symbol, {})['martingale_step'] = step
-                logger.info(f"{symbol}: стоп-лосс, шаг мартингейла = {step}")
-            else:
-                if symbol in self.state:
-                    self.state[symbol]['martingale_step'] = 0
-                logger.info(f"{symbol}: тейк-профит, мартингейл сброшен")
+                self.martingale_step += 1
+                logger.info(f"Стоп-лосс! Глобальный шаг мартингейла = {self.martingale_step}")
+            else:  # take_profit
+                self.martingale_step = 0
+                logger.info(f"Тейк-профит! Глобальный шаг мартингейла сброшен до 0")
+            # Удаляем позицию из отслеживания
             del self.open_positions[symbol]
         except Exception as e:
-            logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
+            logger.error(f"Ошибка закрытия {symbol}: {e}")
 
     async def monitor_positions(self):
         while True:
@@ -161,7 +159,7 @@ class TradingBot:
                     if should_close:
                         await self.close_position(symbol, reason, current_price)
                 except Exception as e:
-                    logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
+                    logger.error(f"Ошибка мониторинга {symbol}: {e}")
             await asyncio.sleep(5)
 
     def calculate_heiken_ashi(self, df):
@@ -176,60 +174,68 @@ class TradingBot:
         df['ha_color'] = df.apply(lambda row: 'green' if row['ha_close'] >= row['ha_open'] else 'red', axis=1)
         return df
 
-    async def get_market_data(self, symbol, limit=30):
+    async def get_market_data(self, symbol, limit=50):
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, self.config["timeframe"], limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.error(f"Ошибка данных для {symbol}: {e}")
+            logger.error(f"Ошибка данных {symbol}: {e}")
             return None
 
     async def process_symbol(self, symbol):
+        # Если уже есть открытая позиция по этому символу, не открываем новую
         if symbol in self.open_positions:
             return
-        df = await self.get_market_data(symbol, limit=30)
-        if df is None or len(df) < 10:
+
+        df = await self.get_market_data(symbol, limit=50)
+        if df is None or len(df) < 20:
             return
         df = self.calculate_heiken_ashi(df)
         current_timestamp = df['timestamp'].iloc[-1]
 
-        if symbol not in self.state:
-            self.state[symbol] = {'last_timestamp': None, 'signal_sent': False, 'martingale_step': 0}
-        state = self.state[symbol]
+        # Инициализируем флаг отправки сигнала для этого символа
+        if symbol not in self.signal_sent:
+            self.signal_sent[symbol] = {'last_timestamp': None, 'sent': False}
 
+        state = self.signal_sent[symbol]
+
+        # Если появилась новая свеча, сбрасываем флаг
         if current_timestamp != state['last_timestamp']:
             state['last_timestamp'] = current_timestamp
-            state['signal_sent'] = False
+            state['sent'] = False
 
-        if state['signal_sent']:
+        if state['sent']:
             return
 
+        # Проверяем сигнал на закрытых свечах
         prev2_color = df['ha_color'].iloc[-3]
         prev1_color = df['ha_color'].iloc[-2]
         current_candle = df.iloc[-1]
         current_ha_open = df['ha_open'].iloc[-1]
 
+        # LONG: предыдущая красная, затем закрылась зелёная + откат вниз на текущей свече
         if prev2_color == 'red' and prev1_color == 'green':
             if current_candle['low'] < current_ha_open:
                 await self.open_position(symbol, 'LONG', current_candle['close'])
-                state['signal_sent'] = True
+                state['sent'] = True
+        # SHORT: предыдущая зеленая, затем закрылась красная + откат вверх
         elif prev2_color == 'green' and prev1_color == 'red':
             if current_candle['high'] > current_ha_open:
                 await self.open_position(symbol, 'SHORT', current_candle['close'])
-                state['signal_sent'] = True
+                state['sent'] = True
 
     async def run(self):
-        await self.load_markets_and_symbols()
+        await self.load_markets()
         asyncio.create_task(self.monitor_positions())
         while True:
             for symbol in self.all_symbols:
                 try:
                     await self.process_symbol(symbol)
                 except Exception as e:
-                    logger.error(f"Ошибка при обработке {symbol}: {e}")
-                await asyncio.sleep(1.5)
+                    logger.error(f"Ошибка {symbol}: {e}")
+                await asyncio.sleep(0.5)
             await asyncio.sleep(60)
 
     async def close(self):
