@@ -128,12 +128,13 @@ class TradingBot:
         try:
             close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
             side = 'LONG' if pos['direction'] == 'LONG' else 'SHORT'
+            # Убираем 'reduceOnly', оставляем только 'positionSide'
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=close_side,
                 amount=pos['quantity'],
-                params={'reduceOnly': True, 'positionSide': side}
+                params={'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             if reason == 'stop_loss':
@@ -200,7 +201,6 @@ class TradingBot:
     async def process_symbol(self, symbol):
         if symbol in self.open_positions:
             return
-        # Лог проверки монеты
         logger.info(f"🔍 Проверяю монету: {symbol}")
         df = await self.get_market_data(symbol, limit=50)
         if df is None or len(df) < 20:
