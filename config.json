@@ -1,5 +1,5 @@
 {
-    "telegram_token": "8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
+    "telegram_token": "можно_любое_значение",
     "telegram_chat_id": "354290076",
     "exchange": "bingx",
     "timeframe": "1h",
@@ -10,37 +10,5 @@
         "default_trade_amount": 1,
         "max_martingale_steps": 3,
         "risk_percent": 0.5
-    },
-    "symbols": [
-        "BTC/USDT:USDT",
-        "ETH/USDT:USDT",
-        "SOL/USDT:USDT",
-        "BNB/USDT:USDT",
-        "XRP/USDT:USDT",
-        "DOGE/USDT:USDT",
-        "ADA/USDT:USDT",
-        "TRX/USDT:USDT",
-        "AVAX/USDT:USDT",
-        "DOT/USDT:USDT",
-        "LINK/USDT:USDT",
-        "UNI/USDT:USDT",
-        "ATOM/USDT:USDT",
-        "LTC/USDT:USDT",
-        "ETC/USDT:USDT",
-        "FIL/USDT:USDT",
-        "APT/USDT:USDT",
-        "ARB/USDT:USDT",
-        "OP/USDT:USDT",
-        "NEAR/USDT:USDT",
-        "INJ/USDT:USDT",
-        "SUI/USDT:USDT",
-        "SEI/USDT:USDT",
-        "TIA/USDT:USDT",
-        "WLD/USDT:USDT",
-        "AAVE/USDT:USDT",
-        "MKR/USDT:USDT",
-        "CRV/USDT:USDT",
-        "SNX/USDT:USDT",
-        "COMP/USDT:USDT"
-    ]
+    }
 }
