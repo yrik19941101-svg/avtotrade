@@ -1,0 +1,29 @@
+{
+    "telegram_token": "8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
+    "telegram_chat_id": "354290076",
+    "exchange": "bingx",
+    "timeframe": "1h",
+    "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
+    "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
+    "trade_params": {
+        "default_leverage": 50,
+        "default_trade_amount": 1,
+        "max_martingale_steps": 3
+    },
+    "per_coin_leverage": {
+        "SIREN/USDT": 25,
+        "PRL/USDT": 20
+    },
+    "symbols": [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+        "DOGE/USDT", "ADA/USDT", "TRX/USDT", "AVAX/USDT", "DOT/USDT",
+        "LINK/USDT", "MATIC/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT",
+        "ETC/USDT", "FIL/USDT", "APT/USDT", "ARB/USDT", "OP/USDT",
+        "NEAR/USDT", "INJ/USDT", "SUI/USDT", "SEI/USDT", "TIA/USDT",
+        "WLD/USDT", "PEPE/USDT", "FLOKI/USDT", "BONK/USDT", "ORDI/USDT",
+        "1000SATS/USDT", "RNDR/USDT", "GRT/USDT", "AAVE/USDT", "MKR/USDT",
+        "CRV/USDT", "SNX/USDT", "COMP/USDT", "ZEC/USDT", "DASH/USDT",
+        "XTZ/USDT", "ALGO/USDT", "VET/USDT", "THETA/USDT", "FTM/USDT",
+        "SAND/USDT", "MANA/USDT", "GALA/USDT", "AXS/USDT", "FLOW/USDT"
+    ]
+}
