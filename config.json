@@ -1,5 +1,5 @@
 {
-    "telegram_token": "ВСТАВЬТЕ_НОВЫЙ_ТОКЕН_TELEGRAM",
+    "telegram_token": "8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
     "telegram_chat_id": "354290076",
     "exchange": "bingx",
     "timeframe": "1h",
@@ -10,7 +10,8 @@
         "default_leverage": 20,
         "fixed_trade_amount": 7,
         "max_martingale_steps": 3,
-        "risk_percent": 0.15,
+        "sl_percent": 0.15,
+        "tp_percent": 0.20,
         "min_pullback_percent": 0.1
     }
 }
