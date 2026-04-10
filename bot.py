@@ -26,21 +26,23 @@ class TradingBot:
                 'adjustForTimeDifference': True
             }
         })
+        # Загружаем рынки (это обязательно для BingX)
+        self.exchange.load_markets()
+        logger.info("Рынки загружены")
         self.state = {}
         self.open_positions = {}
 
     async def load_symbols(self):
         self.all_symbols = self.config['symbols']
-        logger.info(f"✅ Автоторговый бот запущен на BingX")
+        logger.info(f"✅ Бот запущен на BingX")
         logger.info(f"Таймфрейм: {self.config['timeframe']}")
         logger.info(f"Мониторинг: {len(self.all_symbols)} монет")
-        logger.info(f"Начальная сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
+        logger.info(f"Сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
         logger.info(f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов")
         logger.info(f"Плечо: {self.config['trade_params']['default_leverage']}x")
-        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}% от суммы сделки")
+        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}%")
 
     def get_leverage(self, symbol):
-        # единое плечо для всех пар
         return self.config['trade_params']['default_leverage']
 
     def get_trade_amount(self, symbol):
@@ -52,12 +54,11 @@ class TradingBot:
         return base * (2 ** step)
 
     async def set_leverage(self, symbol, leverage, side):
-        """Устанавливает плечо для конкретной стороны (LONG или SHORT)"""
         try:
             await self.exchange.set_leverage(leverage, symbol, params={'side': side})
-            logger.info(f"Плечо {leverage}x установлено для {symbol} ({side})")
+            logger.info(f"Плечо {leverage}x для {symbol} ({side})")
         except Exception as e:
-            logger.error(f"Ошибка установки плеча для {symbol} ({side}): {e}")
+            logger.error(f"Ошибка плеча {symbol}: {e}")
 
     async def open_position(self, symbol, direction, price):
         try:
@@ -68,7 +69,7 @@ class TradingBot:
 
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
-                logger.error(f"Неверное количество для {symbol}: {quantity}")
+                logger.error(f"Неверное количество {symbol}: {quantity}")
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
@@ -82,7 +83,6 @@ class TradingBot:
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
 
             risk_percent = self.config['trade_params']['risk_percent']
-            # Расчёт стоп-лосс и тейк-профит с учётом риска 50% от суммы сделки
             if direction == 'LONG':
                 stop_price = price * (1 - (1/leverage) * risk_percent)
                 take_price = price * (1 + (1/leverage) * risk_percent)
@@ -100,10 +100,9 @@ class TradingBot:
                 'take_price': take_price,
                 'timestamp': datetime.now()
             }
-            logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
-            logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
+            logger.info(f"Стоп: {stop_price:.5f}, Тейк: {take_price:.5f}")
         except Exception as e:
-            logger.error(f"Ошибка открытия позиции для {symbol}: {e}")
+            logger.error(f"Ошибка открытия {symbol}: {e}")
 
     async def close_position(self, symbol, reason, current_price):
         pos = self.open_positions[symbol]
@@ -115,18 +114,18 @@ class TradingBot:
                 side=close_side,
                 amount=pos['quantity']
             )
-            logger.info(f"🔴 ЗАКРЫТА позиция {symbol} по {reason}, цена {current_price}")
+            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             if reason == 'stop_loss':
                 step = self.state.get(symbol, {}).get('martingale_step', 0) + 1
                 self.state.setdefault(symbol, {})['martingale_step'] = step
-                logger.info(f"{symbol}: стоп-лосс, шаг мартингейла = {step}")
+                logger.info(f"{symbol}: мартингейл шаг {step}")
             else:
                 if symbol in self.state:
                     self.state[symbol]['martingale_step'] = 0
-                logger.info(f"{symbol}: тейк-профит, мартингейл сброшен")
+                logger.info(f"{symbol}: мартингейл сброшен")
             del self.open_positions[symbol]
         except Exception as e:
-            logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
+            logger.error(f"Ошибка закрытия {symbol}: {e}")
 
     async def monitor_positions(self):
         while True:
@@ -153,7 +152,7 @@ class TradingBot:
                     if should_close:
                         await self.close_position(symbol, reason, current_price)
                 except Exception as e:
-                    logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
+                    logger.error(f"Ошибка мониторинга {symbol}: {e}")
             await asyncio.sleep(5)
 
     def calculate_heiken_ashi(self, df):
@@ -175,7 +174,7 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.error(f"Ошибка данных для {symbol}: {e}")
+            logger.error(f"Ошибка данных {symbol}: {e}")
             return None
 
     async def process_symbol(self, symbol):
