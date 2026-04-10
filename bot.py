@@ -28,29 +28,26 @@ class TradingBot:
         })
         self.state = {}
         self.open_positions = {}
-        self.all_symbols = []
 
-    async def load_markets(self):
+    async def load_markets_and_symbols(self):
+        # Загружаем рынки
         await self.exchange.load_markets()
         logger.info("Рынки загружены")
-        # Фильтруем только фьючерсные USDT пары
-        all_swap = [s for s, m in self.exchange.markets.items() if m['swap'] and m['quote'] == 'USDT']
-        # Если заданы символы в конфиге, используем пересечение
-        configured = self.config['symbols']
-        self.all_symbols = [s for s in configured if s in all_swap]
-        if not self.all_symbols:
-            # fallback: все swap USDT пары
-            self.all_symbols = all_swap
-        logger.info(f"Отобрано {len(self.all_symbols)} доступных символов")
-
-    async def load_symbols(self):
+        # Фильтруем только USDT-фьючерсы (swap)
+        all_symbols = [s for s in self.exchange.markets if self.exchange.markets[s]['swap'] and s.endswith('/USDT:USDT')]
+        # Если в конфиге есть список symbols, используем его, иначе все найденные
+        if 'symbols' in self.config and self.config['symbols']:
+            self.all_symbols = [s for s in self.config['symbols'] if s in all_symbols]
+            logger.info(f"Используем указанные символы: {len(self.all_symbols)}")
+        else:
+            self.all_symbols = all_symbols
+            logger.info(f"Загружено {len(self.all_symbols)} USDT-фьючерсов")
         logger.info(f"✅ Бот запущен на BingX")
         logger.info(f"Таймфрейм: {self.config['timeframe']}")
-        logger.info(f"Мониторинг: {len(self.all_symbols)} монет")
         logger.info(f"Сумма сделки: ${self.config['trade_params']['default_trade_amount']}")
         logger.info(f"Мартингейл: до {self.config['trade_params']['max_martingale_steps']} шагов")
         logger.info(f"Плечо: {self.config['trade_params']['default_leverage']}x")
-        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}%")
+        logger.info(f"Риск/прибыль: {self.config['trade_params']['risk_percent']*100}% от суммы сделки")
 
     def get_leverage(self, symbol):
         return self.config['trade_params']['default_leverage']
@@ -68,7 +65,7 @@ class TradingBot:
             await self.exchange.set_leverage(leverage, symbol, params={'positionSide': position_side})
             logger.info(f"Плечо {leverage}x для {symbol} ({position_side})")
         except Exception as e:
-            logger.error(f"Ошибка плеча {symbol}: {e}")
+            logger.error(f"Ошибка установки плеча для {symbol}: {e}")
 
     async def open_position(self, symbol, direction, price):
         try:
@@ -79,7 +76,7 @@ class TradingBot:
 
             quantity = round((trade_amount * leverage) / price, 5)
             if quantity <= 0:
-                logger.error(f"Неверное количество {symbol}: {quantity}")
+                logger.error(f"Неверное количество для {symbol}: {quantity}")
                 return
 
             order_side = 'buy' if direction == 'LONG' else 'sell'
@@ -93,6 +90,7 @@ class TradingBot:
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage}")
 
             risk_percent = self.config['trade_params']['risk_percent']
+            # Для плеча 20, риск 50% => изменение цены = (1/20)*0.5 = 2.5%
             if direction == 'LONG':
                 stop_price = price * (1 - (1/leverage) * risk_percent)
                 take_price = price * (1 + (1/leverage) * risk_percent)
@@ -110,10 +108,10 @@ class TradingBot:
                 'take_price': take_price,
                 'timestamp': datetime.now()
             }
-            logger.info(f"Стоп: {stop_price:.5f} ({abs(stop_price/price - 1)*100:.2f}%)")
-            logger.info(f"Тейк: {take_price:.5f} ({abs(take_price/price - 1)*100:.2f}%)")
+            logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
+            logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
         except Exception as e:
-            logger.error(f"Ошибка открытия {symbol}: {e}")
+            logger.error(f"Ошибка открытия позиции для {symbol}: {e}")
 
     async def close_position(self, symbol, reason, current_price):
         pos = self.open_positions[symbol]
@@ -125,18 +123,18 @@ class TradingBot:
                 side=close_side,
                 amount=pos['quantity']
             )
-            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
+            logger.info(f"🔴 ЗАКРЫТА позиция {symbol} по {reason}, цена {current_price}")
             if reason == 'stop_loss':
                 step = self.state.get(symbol, {}).get('martingale_step', 0) + 1
                 self.state.setdefault(symbol, {})['martingale_step'] = step
-                logger.info(f"{symbol}: стоп-лосс, шаг {step}")
+                logger.info(f"{symbol}: стоп-лосс, шаг мартингейла = {step}")
             else:
                 if symbol in self.state:
                     self.state[symbol]['martingale_step'] = 0
                 logger.info(f"{symbol}: тейк-профит, мартингейл сброшен")
             del self.open_positions[symbol]
         except Exception as e:
-            logger.error(f"Ошибка закрытия {symbol}: {e}")
+            logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
 
     async def monitor_positions(self):
         while True:
@@ -163,7 +161,7 @@ class TradingBot:
                     if should_close:
                         await self.close_position(symbol, reason, current_price)
                 except Exception as e:
-                    logger.error(f"Ошибка мониторинга {symbol}: {e}")
+                    logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
             await asyncio.sleep(5)
 
     def calculate_heiken_ashi(self, df):
@@ -185,7 +183,7 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.error(f"Ошибка данных {symbol}: {e}")
+            logger.error(f"Ошибка данных для {symbol}: {e}")
             return None
 
     async def process_symbol(self, symbol):
@@ -223,15 +221,14 @@ class TradingBot:
                 state['signal_sent'] = True
 
     async def run(self):
-        await self.load_markets()
-        await self.load_symbols()
+        await self.load_markets_and_symbols()
         asyncio.create_task(self.monitor_positions())
         while True:
             for symbol in self.all_symbols:
                 try:
                     await self.process_symbol(symbol)
                 except Exception as e:
-                    logger.error(f"Ошибка {symbol}: {e}")
+                    logger.error(f"Ошибка при обработке {symbol}: {e}")
                 await asyncio.sleep(1.5)
             await asyncio.sleep(60)
 
