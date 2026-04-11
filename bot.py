@@ -51,14 +51,18 @@ class TradingBot:
     async def load_markets(self):
         await self.exchange.load_markets()
         all_swap = [s for s, m in self.exchange.markets.items() if m['swap'] and m['quote'] == 'USDT']
-        self.all_symbols = all_swap[:50]
-        logger.info(f"Загружено {len(self.all_symbols)} пар, таймфрейм {self.config['timeframe']}")
+        self.all_symbols = all_swap  # мониторим все доступные пары
+        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
+        logger.info(f"Таймфрейм: {self.config['timeframe']}, высший ТФ: {self.config.get('higher_timeframe', 'отключён')}")
 
     def get_trade_amount(self):
         base = self.config['trade_params']['fixed_trade_amount']
         return base * 2 if self.next_trade_doubled else base
 
     async def check_higher_trend(self, symbol):
+        """Проверка тренда на старшем таймфрейме (если включено)"""
+        if not self.config['trade_params'].get('use_higher_trend', False):
+            return None  # фильтр отключён
         higher_tf = self.config.get('higher_timeframe')
         if not higher_tf:
             return None
@@ -77,6 +81,9 @@ class TradingBot:
             return None
 
     async def check_atr(self, symbol):
+        """Проверка ATR (если включено)"""
+        if not self.config['trade_params'].get('use_atr_filter', False):
+            return True
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, self.config['timeframe'], limit=20)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -91,11 +98,15 @@ class TradingBot:
             return True
 
     async def check_volume(self, symbol, current_volume):
+        """Проверка объёма (если включено)"""
+        if not self.config['trade_params'].get('use_volume_filter', False):
+            return True
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, self.config['timeframe'], limit=20)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             avg_volume = df['volume'].iloc[-10:-1].mean()
-            return current_volume >= avg_volume * self.config['trade_params'].get('volume_multiplier', 1.0)
+            multiplier = self.config['trade_params'].get('volume_multiplier', 1.2)
+            return current_volume >= avg_volume * multiplier
         except Exception as e:
             logger.error(f"Ошибка объёма {symbol}: {e}")
             return True
@@ -105,21 +116,22 @@ class TradingBot:
             logger.warning(f"Лимит позиций достигнут")
             return
 
+        # Фильтры
         higher_trend = await self.check_higher_trend(symbol)
         if higher_trend:
             if direction == 'LONG' and higher_trend != 'green':
-                logger.info(f"{symbol}: пропуск LONG, тренд 4H {higher_trend}")
+                logger.info(f"{symbol}: пропуск LONG (тренд 4H {higher_trend})")
                 return
             if direction == 'SHORT' and higher_trend != 'red':
-                logger.info(f"{symbol}: пропуск SHORT, тренд 4H {higher_trend}")
+                logger.info(f"{symbol}: пропуск SHORT (тренд 4H {higher_trend})")
                 return
 
         if not await self.check_atr(symbol):
-            logger.info(f"{symbol}: ATR вне диапазона")
+            logger.info(f"{symbol}: ATR фильтр не пройден")
             return
 
         if not await self.check_volume(symbol, volume):
-            logger.info(f"{symbol}: объём отката ниже среднего")
+            logger.info(f"{symbol}: объём ниже среднего")
             return
 
         trade_amount = self.get_trade_amount()
@@ -163,7 +175,6 @@ class TradingBot:
                 'trailing_activated': False,
                 'breakeven_stop': None
             }
-            # После открытия сбрасываем флаг удвоения, чтобы следующая сделка была базовой
             self.next_trade_doubled = False
 
             balance = await self.get_balance()
@@ -231,10 +242,7 @@ class TradingBot:
                     tp_percent = self.config['trade_params']['tp_percent']
                     activation = self.config['trade_params'].get('trailing_stop_activation', 0.5)
                     if not pos.get('trailing_activated'):
-                        if pos['direction'] == 'LONG':
-                            profit_percent = (current_price - pos['entry_price']) / pos['entry_price']
-                        else:
-                            profit_percent = (pos['entry_price'] - current_price) / pos['entry_price']
+                        profit_percent = (current_price - pos['entry_price']) / pos['entry_price'] if pos['direction'] == 'LONG' else (pos['entry_price'] - current_price) / pos['entry_price']
                         if profit_percent >= tp_percent * activation:
                             pos['trailing_activated'] = True
                             pos['breakeven_stop'] = pos['entry_price']
@@ -352,7 +360,22 @@ class TradingBot:
         await self.load_markets()
         asyncio.create_task(self.monitor_positions())
         balance = await self.get_balance()
-        await self.send_telegram(f"🚀 Бот запущен (улучшенная стратегия)\nТаймфрейм: 30m\nФильтры: тренд 4H, ATR, объём\nОткат: {self.config['trade_params']['min_pullback_percent']}%\nБазовый лот: 7 USDT, мартингейл (удвоение после стоп-лосса)\nБаланс: {balance:.2f} USDT")
+        filters_status = []
+        if self.config['trade_params'].get('use_higher_trend'):
+            filters_status.append("тренд 4H")
+        if self.config['trade_params'].get('use_atr_filter'):
+            filters_status.append("ATR")
+        if self.config['trade_params'].get('use_volume_filter'):
+            filters_status.append("объём")
+        filters_text = ", ".join(filters_status) if filters_status else "все фильтры отключены"
+        await self.send_telegram(
+            f"🚀 Бот запущен\n"
+            f"Таймфрейм: 30m\n"
+            f"Активные фильтры: {filters_text}\n"
+            f"Откат: {self.config['trade_params']['min_pullback_percent']}%\n"
+            f"Базовый лот: 7 USDT, мартингейл (удвоение после стоп-лосса)\n"
+            f"Баланс: {balance:.2f} USDT"
+        )
         while True:
             for symbol in self.all_symbols:
                 try:
