@@ -3,6 +3,7 @@
     "telegram_chat_id": "354290076",
     "exchange": "bingx",
     "timeframe": "30m",
+    "higher_timeframe": "4h",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
     "max_positions": 10,
@@ -12,6 +13,10 @@
         "max_martingale_steps": 3,
         "sl_percent": 0.15,
         "tp_percent": 0.20,
-        "min_pullback_percent": 0.3
+        "min_pullback_percent": 0.4,
+        "min_atr": 0.001,
+        "max_atr": 0.05,
+        "volume_multiplier": 1.1,
+        "trailing_stop_activation": 0.5
     }
 }
