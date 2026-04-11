@@ -50,7 +50,6 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Получаем все swap-символы с USDT
         all_swap = [symbol for symbol, market in self.exchange.markets.items()
                     if market['swap'] and market['quote'] == 'USDT']
         self.all_symbols = all_swap
@@ -70,8 +69,6 @@ class TradingBot:
         leverage = self.config['trade_params']['default_leverage']
         side = 'LONG' if direction == 'LONG' else 'SHORT'
         order_side = 'buy' if direction == 'LONG' else 'sell'
-
-        # Не устанавливаем плечо – пользователь настроил вручную
 
         quantity = (trade_amount * leverage) / price
         quantity = round(quantity, 5)
@@ -98,7 +95,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT, плечо {leverage} (ручное)")
+            logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
             logger.info(f"SL: {stop_price:.5f} (изм {abs(stop_price/price - 1)*100:.2f}%)")
             logger.info(f"TP: {take_price:.5f} (изм {abs(take_price/price - 1)*100:.2f}%)")
 
@@ -120,7 +117,7 @@ class TradingBot:
             emoji = "🟢" if direction == 'LONG' else "🔴"
             msg = (f"{emoji} ОТКРЫТА СДЕЛКА {direction}\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
-                   f"Плечо: {leverage}x (ваше ручное)\nКол-во: {quantity:.5f}\n"
+                   f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\n"
                    f"SL: {stop_price:.5f} ({sl_percent*100:.0f}%)\n"
                    f"TP: {take_price:.5f} ({tp_percent*100:.0f}%)\n"
                    f"Баланс: {balance:.2f} USDT")
@@ -143,7 +140,7 @@ class TradingBot:
                 type='market',
                 side=close_side,
                 amount=pos['quantity'],
-                params={'reduceOnly': True, 'positionSide': side}
+                params={'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             self.pos_data[symbol]['closed'] = True
