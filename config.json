@@ -13,10 +13,10 @@
         "max_martingale_steps": 3,
         "sl_percent": 0.15,
         "tp_percent": 0.20,
-        "min_pullback_percent": 0.4,
-        "min_atr": 0.001,
-        "max_atr": 0.05,
-        "volume_multiplier": 1.1,
+        "min_pullback_percent": 0.3,
+        "use_higher_trend": true,
+        "use_atr_filter": false,
+        "use_volume_filter": false,
         "trailing_stop_activation": 0.5
     }
 }
