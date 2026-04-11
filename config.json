@@ -5,14 +5,21 @@
     "timeframe": "30m",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "max_positions": 20,
+    "max_positions": 5,
     "trade_params": {
-        "default_leverage": 50,
-        "fixed_trade_amount": 1,
-        "max_martingale_steps": 3,
-        "sl_percent": 0.5,
-        "tp_percent": 0.5,
-        "min_pullback_percent": 0.3,
-        "trailing_stop_activation": 0.5
-     }
+        "default_leverage": 25,
+        "fixed_trade_amount": 5,
+        "trailing_activation_percent": 0.5,
+        "min_minutes_to_close": 15
+    },
+    "symbols": [
+        "SIREN/USDT", "TRIA/USDT", "EDGEX/USDT", "XPL/USDT", "PRL/USDT",
+        "NFP/USDT", "BEAM/USDT", "KAS/USDT", "HIFI/USDT", "MBL/USDT",
+        "OM/USDT", "DYM/USDT", "VIRTUALUSDT", "AIXBTUSDT", "ALMANAKUSDT",
+        "USUSDT", "GIGAUSDT", "MELANIAUSDT", "COMMONUSDT", "NULSUSDT",
+        "BEL/USDT", "CVC/USDT", "JST/USDT", "LINA/USDT", "LPT/USDT",
+        "REN/USDT", "RLC/USDT", "SCRT/USDT", "CKB/USDT", "KEY/USDT",
+        "IDEX/USDT", "HOT/USDT", "LIT/USDT", "AKRO/USDT", "AGLD/USDT",
+        "LOOKS/USDT", "ILV/USDT", "METIS/USDT", "PERP/USDT", "MAGMAUSDT"
+    ]
 }
