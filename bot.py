@@ -30,7 +30,7 @@ class TradingBot:
         self.next_trade_doubled = False
         self.open_positions = set()
         self.pos_data = {}
-        self.all_symbols = self.config['symbols']
+        self.all_symbols = []
         self.signal_state = {}
         self.telegram_bot = Bot(token=config["telegram_token"])
 
@@ -50,9 +50,11 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        valid = [s for s in self.all_symbols if s in self.exchange.markets]
-        self.all_symbols = valid
-        logger.info(f"Загружено {len(self.all_symbols)} доступных пар")
+        # Получаем все swap-символы с USDT
+        all_swap = [symbol for symbol, market in self.exchange.markets.items()
+                    if market['swap'] and market['quote'] == 'USDT']
+        self.all_symbols = all_swap
+        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
         logger.info(f"Таймфрейм: {self.config['timeframe']}")
 
     def get_trade_amount(self):
@@ -69,7 +71,7 @@ class TradingBot:
         side = 'LONG' if direction == 'LONG' else 'SHORT'
         order_side = 'buy' if direction == 'LONG' else 'sell'
 
-        # НЕ устанавливаем плечо – оно настроено вручную на бирже
+        # Не устанавливаем плечо – пользователь настроил вручную
 
         quantity = (trade_amount * leverage) / price
         quantity = round(quantity, 5)
@@ -299,7 +301,7 @@ class TradingBot:
         asyncio.create_task(self.monitor_positions())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Бот запущен (BingX)\n"
+            f"🚀 Бот запущен (BingX, все фьючерсы)\n"
             f"Таймфрейм: 30m\nСумма сделки: 1 USDT\nSL/TP: 50%\n"
             f"Мартингейл: удвоение после стоп-лосса\nТрейлинг-стоп: при 50% TP\n"
             f"Максимум позиций: {self.config['max_positions']}\n"
