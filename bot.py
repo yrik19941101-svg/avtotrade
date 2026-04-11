@@ -148,12 +148,13 @@ class TradingBot:
         try:
             close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
             side = 'LONG' if pos['direction'] == 'LONG' else 'SHORT'
+            # Убрали reduceOnly, оставили только positionSide
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=close_side,
                 amount=pos['quantity'],
-                params={'reduceOnly': True, 'positionSide': side}
+                params={'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             self.pos_data[symbol]['closed'] = True
