@@ -29,7 +29,6 @@ class TradingBot:
         })
         self.open_positions = {}
         self.all_symbols = []
-        self.signal_state = {}
         self.telegram_bot = Bot(token=config["telegram_token"])
 
     async def get_balance(self):
@@ -48,7 +47,6 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Загружаем все USDT-фьючерсы
         self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
                             if market['swap'] and market['quote'] == 'USDT']
         logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
@@ -113,20 +111,35 @@ class TradingBot:
             )
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
 
+            sl_percent = self.config['trade_params']['sl_percent']
+            tp_percent = self.config['trade_params']['tp_percent']
+            if direction == 'LONG':
+                stop_price = round(price * (1 - sl_percent), 5)
+                take_price = round(price * (1 + tp_percent), 5)
+            else:
+                stop_price = round(price * (1 + sl_percent), 5)
+                take_price = round(price * (1 - tp_percent), 5)
+
             self.open_positions[symbol] = {
                 'direction': direction,
                 'entry_price': price,
                 'quantity': quantity,
                 'entry_time': datetime.now(),
+                'stop_price': stop_price,
+                'take_price': take_price,
+                'trailing_activated': False,
                 'trailing_stop_price': None,
-                'trailing_activated': False
+                'min_hold_seconds': self.config['trade_params']['min_hold_seconds']
             }
 
             balance = await self.get_balance()
             emoji = "🟢" if direction == 'LONG' else "🔴"
             msg = (f"{emoji} ОТКРЫТА СДЕЛКА {direction}\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
-                   f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\nБаланс: {balance:.2f} USDT")
+                   f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\n"
+                   f"SL: {stop_price:.5f} ({sl_percent*100:.1f}%)\n"
+                   f"TP: {take_price:.5f} ({tp_percent*100:.1f}%)\n"
+                   f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
 
         except Exception as e:
@@ -170,28 +183,38 @@ class TradingBot:
                     current_price = ticker['last']
                     direction = pos['direction']
                     entry_price = pos['entry_price']
+                    hold_time = (datetime.now() - pos['entry_time']).total_seconds()
+                    min_hold = pos.get('min_hold_seconds', 30)
 
-                    # Проверка противоположного сигнала
-                    df = await self.get_market_data(symbol, limit=5)
-                    if df is not None:
-                        ha_df = self.calculate_heiken_ashi(df)
-                        current_color = ha_df['ha_color'].iloc[-1]
-                        if direction == 'LONG' and current_color == 'red':
-                            await self.close_position(symbol, 'opposite_signal', current_price)
-                            continue
-                        elif direction == 'SHORT' and current_color == 'green':
-                            await self.close_position(symbol, 'opposite_signal', current_price)
-                            continue
+                    # Стоп-лосс и тейк-профит (только после минимального времени удержания)
+                    if hold_time >= min_hold:
+                        if direction == 'LONG':
+                            if current_price <= pos['stop_price']:
+                                await self.close_position(symbol, 'stop_loss', current_price)
+                                continue
+                            elif current_price >= pos['take_price']:
+                                await self.close_position(symbol, 'take_profit', current_price)
+                                continue
+                        else:
+                            if current_price >= pos['stop_price']:
+                                await self.close_position(symbol, 'stop_loss', current_price)
+                                continue
+                            elif current_price <= pos['take_price']:
+                                await self.close_position(symbol, 'take_profit', current_price)
+                                continue
 
-                    # Трейлинг-стоп
+                    # Трейлинг-стоп (активация после прохода activation_percent)
+                    activation_percent = self.config['trade_params']['trailing_activation_percent']
                     profit_percent = (current_price - entry_price) / entry_price if direction == 'LONG' else (entry_price - current_price) / entry_price
-                    activation_percent = self.config['trade_params']['trailing_activation_percent'] / 100
 
                     if not pos['trailing_activated'] and profit_percent >= activation_percent:
                         pos['trailing_activated'] = True
-                        # Устанавливаем стоп-лосс на небольшой плюс (компенсируем комиссии)
-                        pos['trailing_stop_price'] = entry_price * (1 + 0.0005) if direction == 'LONG' else entry_price * (1 - 0.0005)
-                        logger.info(f"{symbol}: трейлинг-стоп активирован на {pos['trailing_stop_price']:.5f}")
+                        # Устанавливаем стоп-лосс на уровне входа (безубыток) + небольшой запас 0.05% для покрытия комиссий
+                        trailing_stop_price = entry_price * (1 + 0.0005) if direction == 'LONG' else entry_price * (1 - 0.0005)
+                        pos['trailing_stop_price'] = trailing_stop_price
+                        logger.info(f"{symbol}: трейлинг-стоп активирован на {trailing_stop_price:.5f}")
+                        # Отправляем уведомление
+                        await self.send_telegram(f"🔒 {symbol}: трейлинг-стоп активирован, стоп на {trailing_stop_price:.5f}")
 
                     if pos['trailing_activated']:
                         if direction == 'LONG' and current_price <= pos['trailing_stop_price']:
@@ -217,7 +240,7 @@ class TradingBot:
         signal_color = ha_df['ha_color'].iloc[-2]
         current_color = ha_df['ha_color'].iloc[-1]
 
-        # Проверка времени для входа
+        # Проверка времени для входа (осталось не менее 15 минут до закрытия свечи)
         current_time = datetime.now()
         candle_open_time = df['timestamp'].iloc[-1]
         candle_close_time = candle_open_time + timedelta(minutes=30)
@@ -243,6 +266,8 @@ class TradingBot:
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
+            f"SL: {self.config['trade_params']['sl_percent']*100:.1f}%, TP: {self.config['trade_params']['tp_percent']*100:.1f}%\n"
+            f"Трейлинг-стоп активация: {self.config['trade_params']['trailing_activation_percent']*100:.1f}%\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
