@@ -28,17 +28,24 @@ class TradingBot:
             }
         })
         self.consecutive_losses = 0
-        self.open_positions = set()
-        self.pos_data = {}
+        self.open_positions = {}  # symbol -> данные позиции
         self.all_symbols = []
         self.signal_state = {}
         self.telegram_bot = Bot(token=config["telegram_token"])
 
     async def send_telegram(self, message):
         try:
-            await self.telegram_bot.send_message(chat_id=self.config["telegram_chat_id"], text=message, parse_mode='Markdown')
+            await self.telegram_bot.send_message(chat_id=self.config["telegram_chat_id"], text=message, parse_mode=None)
         except Exception as e:
             logger.error(f"Ошибка отправки Telegram: {e}")
+
+    async def get_balance(self):
+        try:
+            balance = await self.exchange.fetch_balance()
+            return balance['USDT']['free']
+        except Exception as e:
+            logger.error(f"Ошибка получения баланса: {e}")
+            return 0
 
     async def load_markets(self):
         await self.exchange.load_markets()
@@ -56,13 +63,9 @@ class TradingBot:
 
     def get_trade_amount(self):
         base = self.config['trade_params']['fixed_trade_amount']
-        step = self.consecutive_losses
-        max_step = self.config['trade_params']['max_martingale_steps']
-        if step > max_step:
-            step = max_step
-        multiplier = 2 ** step
-        amount = base * multiplier
-        logger.info(f"Шаг мартингейла: {step}, сумма сделки: {amount:.2f} USDT")
+        step = min(self.consecutive_losses, self.config['trade_params']['max_martingale_steps'])
+        amount = base * (2 ** step)
+        logger.info(f"Мартингейл шаг {step}, сумма сделки: {amount:.2f} USDT")
         return amount
 
     async def set_leverage(self, symbol, leverage, side):
@@ -111,8 +114,8 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * tp_percent), 5)
 
-            self.open_positions.add(symbol)
-            self.pos_data[symbol] = {
+            balance = await self.get_balance()
+            self.open_positions[symbol] = {
                 'direction': direction,
                 'entry_price': price,
                 'quantity': quantity,
@@ -120,35 +123,34 @@ class TradingBot:
                 'take_price': take_price,
                 'trade_amount': trade_amount,
                 'leverage': leverage,
-                'closed': False
+                'opened_at': datetime.now()
             }
-            logger.info(f"Стоп-лосс: {stop_price:.5f} (изменение {abs(stop_price/price - 1)*100:.2f}%)")
-            logger.info(f"Тейк-профит: {take_price:.5f} (изменение {abs(take_price/price - 1)*100:.2f}%)")
 
             emoji = "🟢" if direction == 'LONG' else "🔴"
-            msg = (f"{emoji} **ОТКРЫТА СДЕЛКА {direction}**\n"
+            msg = (f"{emoji} ОТКРЫТА СДЕЛКА {direction}\n"
                    f"Монета: {symbol}\n"
                    f"Цена: {price:.5f}\n"
                    f"Сумма: {trade_amount:.2f} USDT\n"
                    f"Плечо: {leverage}x\n"
-                   f"Стоп-лосс: {stop_price:.5f} (SL {sl_percent*100:.0f}%)\n"
-                   f"Тейк-профит: {take_price:.5f} (TP {tp_percent*100:.0f}%)\n"
+                   f"Стоп-лосс: {stop_price:.5f}\n"
+                   f"Тейк-профит: {take_price:.5f}\n"
+                   f"Баланс: {balance:.2f} USDT\n"
                    f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             await self.send_telegram(msg)
 
+            # Сбрасываем состояние сигнала
             if symbol in self.signal_state:
                 self.signal_state[symbol]['waiting_for_pullback'] = False
         except Exception as e:
             logger.error(f"Ошибка открытия {symbol}: {e}")
 
     async def close_position(self, symbol, reason, current_price):
-        pos = self.pos_data.get(symbol)
-        if not pos or pos.get('closed', False):
+        pos = self.open_positions.get(symbol)
+        if not pos:
             return
         try:
             close_side = 'sell' if pos['direction'] == 'LONG' else 'buy'
             side = 'LONG' if pos['direction'] == 'LONG' else 'SHORT'
-            # Убрали reduceOnly, оставили только positionSide
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -157,42 +159,45 @@ class TradingBot:
                 params={'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
-            self.pos_data[symbol]['closed'] = True
 
+            balance = await self.get_balance()
             emoji = "🔴" if reason == 'stop_loss' else "🟢"
-            msg = (f"{emoji} **СДЕЛКА ЗАКРЫТА**\n"
+            msg = (f"{emoji} СДЕЛКА ЗАКРЫТА\n"
                    f"Монета: {symbol}\n"
                    f"Причина: {reason}\n"
                    f"Цена закрытия: {current_price:.5f}\n"
+                   f"Баланс: {balance:.2f} USDT\n"
                    f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             await self.send_telegram(msg)
 
+            # Обновляем мартингейл
             if reason == 'stop_loss':
                 self.consecutive_losses += 1
                 logger.warning(f"Убытков подряд: {self.consecutive_losses}")
-                msg_loss = f"⚠️ **СТОП-ЛОСС**\nУбытков подряд: {self.consecutive_losses}\nСледующая сделка будет с суммой {self.get_trade_amount():.2f} USDT"
+                next_amount = self.get_trade_amount()
+                msg_loss = (f"⚠️ СТОП-ЛОСС\n"
+                            f"Убытков подряд: {self.consecutive_losses}\n"
+                            f"Следующая сделка: {next_amount:.2f} USDT\n"
+                            f"Баланс: {balance:.2f} USDT")
                 await self.send_telegram(msg_loss)
-            else:
+            else:  # take_profit
                 self.consecutive_losses = 0
                 logger.info(f"Тейк-профит, мартингейл сброшен")
-                msg_tp = f"✅ **ТЕЙК-ПРОФИТ**\nМартингейл сброшен. Следующая сделка {self.get_trade_amount():.2f} USDT"
+                next_amount = self.get_trade_amount()
+                msg_tp = (f"✅ ТЕЙК-ПРОФИТ\n"
+                          f"Мартингейл сброшен\n"
+                          f"Следующая сделка: {next_amount:.2f} USDT\n"
+                          f"Баланс: {balance:.2f} USDT")
                 await self.send_telegram(msg_tp)
 
-            self.open_positions.discard(symbol)
-            asyncio.create_task(self.delayed_cleanup(symbol))
+            # Удаляем позицию
+            del self.open_positions[symbol]
         except Exception as e:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
 
-    async def delayed_cleanup(self, symbol):
-        await asyncio.sleep(10)
-        if symbol in self.pos_data:
-            del self.pos_data[symbol]
-
     async def monitor_positions(self):
         while True:
-            for symbol, pos in list(self.pos_data.items()):
-                if pos.get('closed', False):
-                    continue
+            for symbol, pos in list(self.open_positions.items()):
                 try:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     current_price = ticker['last']
@@ -259,8 +264,10 @@ class TradingBot:
             }
         state = self.signal_state[symbol]
 
+        # Если появилась новая свеча (закрылась предыдущая)
         if current_ts != state['last_candle_ts']:
             state['last_candle_ts'] = current_ts
+            # Проверяем смену цвета на закрытой свече (индекс -2) относительно предыдущей (-3)
             prev2 = df['ha_color'].iloc[-3]
             prev1 = df['ha_color'].iloc[-2]
             signal_candle = df.iloc[-2]
@@ -268,21 +275,22 @@ class TradingBot:
                 state['waiting_for_pullback'] = True
                 state['signal_direction'] = 'LONG'
                 state['signal_candle_close'] = signal_candle['close']
-                logger.info(f"{symbol}: сигнал LONG, ждём отката вниз")
+                logger.info(f"{symbol}: сигнал LONG (закрылась зелёная), ждём отката вниз")
             elif prev2 == 'green' and prev1 == 'red':
                 state['waiting_for_pullback'] = True
                 state['signal_direction'] = 'SHORT'
                 state['signal_candle_close'] = signal_candle['close']
-                logger.info(f"{symbol}: сигнал SHORT, ждём отката вверх")
+                logger.info(f"{symbol}: сигнал SHORT (закрылась красная), ждём отката вверх")
             else:
                 state['waiting_for_pullback'] = False
-                state['signal_direction'] = None
 
-        if state['waiting_for_pullback']:
+        # Если ждём отката, проверяем текущую свечу (незакрытую)
+        if state.get('waiting_for_pullback'):
             current_candle = df.iloc[-1]
             current_ha_open = df['ha_open'].iloc[-1]
             min_pullback = self.config['trade_params']['min_pullback_percent'] / 100.0
             if state['signal_direction'] == 'LONG':
+                # Цена должна опуститься ниже HA_Open и ниже цены закрытия сигнальной свечи
                 target_low = min(current_ha_open, state['signal_candle_close']) * (1 - min_pullback)
                 if current_candle['low'] <= target_low:
                     await self.open_position(symbol, 'LONG', current_candle['close'])
@@ -297,7 +305,8 @@ class TradingBot:
         await self.load_markets()
         asyncio.create_task(self.monitor_positions())
         logger.info("✅ Бот запущен, ожидание сигналов...")
-        await self.send_telegram("🚀 **Бот запущен**\nТаймфрейм: 30 минут\nСумма сделки: 7 USDT\nSL: 15%, TP: 20%\nМартингейл: до 3 шагов")
+        balance = await self.get_balance()
+        await self.send_telegram(f"🚀 Бот запущен\nТаймфрейм: 30 минут\nСумма сделки: 7 USDT\nSL: 15%, TP: 20%\nМартингейл: до 3 шагов\nБаланс: {balance:.2f} USDT")
         while True:
             for symbol in self.all_symbols:
                 try:
