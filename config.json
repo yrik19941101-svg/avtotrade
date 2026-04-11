@@ -1,7 +1,7 @@
 {
     "telegram_token": "8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
     "telegram_chat_id": "354290076",
-    "exchange": "bingx",
+    "exchange": "bingx,
     "timeframe": "30m",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
@@ -9,7 +9,10 @@
     "trade_params": {
         "default_leverage": 25,
         "fixed_trade_amount": 5,
-        "trailing_activation_percent": 0.5,
+        "sl_percent": 0.008,
+        "tp_percent": 0.016,
+        "trailing_activation_percent": 0.008,
+        "min_hold_seconds": 30,
         "min_minutes_to_close": 15
-       }
+    }
 }
