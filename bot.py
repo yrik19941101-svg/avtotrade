@@ -28,7 +28,7 @@ class TradingBot:
             }
         })
         self.open_positions = {}
-        self.all_symbols = self.config['symbols']
+        self.all_symbols = []
         self.signal_state = {}
         self.telegram_bot = Bot(token=config["telegram_token"])
 
@@ -48,9 +48,10 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        valid = [s for s in self.all_symbols if s in self.exchange.markets]
-        self.all_symbols = valid
-        logger.info(f"Загружено {len(self.all_symbols)} доступных пар")
+        # Загружаем все USDT-фьючерсы
+        self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
+                            if market['swap'] and market['quote'] == 'USDT']
+        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
         logger.info(f"Таймфрейм: {self.config['timeframe']}")
 
     def calculate_heiken_ashi(self, df):
@@ -218,7 +219,6 @@ class TradingBot:
 
         # Проверка времени для входа
         current_time = datetime.now()
-        # Получаем время начала свечи из DataFrame
         candle_open_time = df['timestamp'].iloc[-1]
         candle_close_time = candle_open_time + timedelta(minutes=30)
         minutes_to_close = (candle_close_time - current_time).total_seconds() / 60
@@ -238,7 +238,7 @@ class TradingBot:
         asyncio.create_task(self.monitor_positions())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Бот запущен (BingX, стратегия Heiken Ashi)\n"
+            f"🚀 Бот запущен (BingX, все фьючерсы)\n"
             f"Таймфрейм: {self.config['timeframe']}\n"
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
