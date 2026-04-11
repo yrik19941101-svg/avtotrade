@@ -14,19 +14,5 @@
         "tp_percent": 0.5,
         "min_pullback_percent": 0.3,
         "trailing_stop_activation": 0.5
-    },
-    "symbols": [
-        "TRUMP/USDT", "SIREN/USDT", "JCT/USDT", "LYN/USDT",
-        "ETH/USDT", "SOL/USDT", "XRP/USDT", "DASH/USDT",
-        "BULLA/USDT", "HYPE/USDT", "SUI/USDT", "LINK/USDT",
-        "PEPE/USDT", "ADA/USDT", "AAVE/USDT", "ENA/USDT",
-        "BNB/USDT", "WLD/USDT", "FET/USDT", "ZEN/USDT",
-        "NEAR/USDT", "ALGO/USDT", "UNI/USDT", "BCH/USDT",
-        "LTC/USDT", "XMR/USDT", "HBAR/USDT", "TON/USDT",
-        "XLM/USDT", "ONDO/USDT", "FLOKI/USDT", "OP/USDT",
-        "INJ/USDT", "LUNC/USDT", "SEI/USDT", "ICP/USDT",
-        "LDO/USDT", "ETC/USDT", "ATOM/USDT", "FIL/USDT",
-        "CRV/USDT", "BOME/USDT", "FLOW/USDT", "PYTH/USDT",
-        "XAI/USDT", "PNUT/USDT"
-    ]
+     }
 }
