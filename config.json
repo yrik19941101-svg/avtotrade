@@ -11,15 +11,5 @@
         "fixed_trade_amount": 5,
         "trailing_activation_percent": 0.5,
         "min_minutes_to_close": 15
-    },
-    "symbols": [
-        "SIREN/USDT", "TRIA/USDT", "EDGEX/USDT", "XPL/USDT", "PRL/USDT",
-        "NFP/USDT", "BEAM/USDT", "KAS/USDT", "HIFI/USDT", "MBL/USDT",
-        "OM/USDT", "DYM/USDT", "VIRTUALUSDT", "AIXBTUSDT", "ALMANAKUSDT",
-        "USUSDT", "GIGAUSDT", "MELANIAUSDT", "COMMONUSDT", "NULSUSDT",
-        "BEL/USDT", "CVC/USDT", "JST/USDT", "LINA/USDT", "LPT/USDT",
-        "REN/USDT", "RLC/USDT", "SCRT/USDT", "CKB/USDT", "KEY/USDT",
-        "IDEX/USDT", "HOT/USDT", "LIT/USDT", "AKRO/USDT", "AGLD/USDT",
-        "LOOKS/USDT", "ILV/USDT", "METIS/USDT", "PERP/USDT", "MAGMAUSDT"
-    ]
+       }
 }
