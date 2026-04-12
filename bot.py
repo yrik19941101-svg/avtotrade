@@ -28,10 +28,8 @@ class TradingBot:
             }
         })
         self.open_positions = {}
-        self.all_symbols = []
-        self.global_loss_streak = 0
+        self.all_symbols = config["symbols"]
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.blacklist = set()
         self.last_heartbeat = datetime.now()
         self.timeframes = config["timeframes"]
         self.pullback_factor = config.get("pullback_factor", 0.995)
@@ -57,26 +55,9 @@ class TradingBot:
             msg = (f"🟢 БОТ АКТИВЕН\n"
                    f"Время: {now.strftime('%H:%M:%S')}\n"
                    f"Открытых позиций: {len(self.open_positions)}\n"
-                   f"Баланс: {balance:.2f} USDT\n"
-                   f"Серия убытков: {self.global_loss_streak}")
+                   f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
             self.last_heartbeat = now
-
-    async def load_markets(self):
-        await self.exchange.load_markets()
-        self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
-                            if market['swap'] and market['quote'] == 'USDT' and
-                            symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
-        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
-
-    def get_trade_amount(self):
-        base = self.config['trade_params']['fixed_trade_amount']
-        if self.global_loss_streak == 0:
-            return base
-        elif self.global_loss_streak == 1:
-            return base * 2
-        else:
-            return base
 
     def calculate_heiken_ashi(self, df):
         df = df.copy()
@@ -97,10 +78,7 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            if 'pause currently' in str(e) or 'not found' in str(e):
-                self.blacklist.add(symbol)
-            else:
-                logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
+            logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
             return None
 
     async def check_signal_on_timeframe(self, symbol, timeframe):
@@ -113,19 +91,15 @@ class TradingBot:
         current_candle = ha_df.iloc[-1]
         current_ha_open = current_candle['ha_open']
 
-        # LONG: предыдущая красная, сигнальная зелёная, откат вниз на pullback_factor
         if prev_color == 'red' and signal_color == 'green':
             if current_candle['low'] < current_ha_open * self.pullback_factor:
                 return 'LONG'
-        # SHORT: предыдущая зелёная, сигнальная красная, откат вверх (симметрично)
         elif prev_color == 'green' and signal_color == 'red':
             if current_candle['high'] > current_ha_open / self.pullback_factor:
                 return 'SHORT'
         return None
 
     async def check_signal_combined(self, symbol):
-        if symbol in self.blacklist:
-            return None
         signals = []
         for tf in self.timeframes:
             sig = await self.check_signal_on_timeframe(symbol, tf)
@@ -150,7 +124,7 @@ class TradingBot:
             logger.warning(f"Лимит позиций ({self.config['max_positions']}) достигнут")
             return
 
-        trade_amount = self.get_trade_amount()
+        trade_amount = self.config['trade_params']['fixed_trade_amount']
         leverage = self.config['trade_params']['default_leverage']
         side = 'LONG' if direction == 'LONG' else 'SHORT'
         order_side = 'buy' if direction == 'LONG' else 'sell'
@@ -184,10 +158,6 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * tp_percent), 5)
 
-            # Трейлинг-стоп: активация при 50% от TP
-            trailing_activation = self.config['trade_params']['trailing_activation_ratio']
-            activation_price = price + (take_price - price) * trailing_activation if direction == 'LONG' else price - (price - take_price) * trailing_activation
-
             self.open_positions[symbol] = {
                 'direction': direction,
                 'entry_price': price,
@@ -196,9 +166,6 @@ class TradingBot:
                 'take_price': take_price,
                 'trade_amount': trade_amount,
                 'leverage': leverage,
-                'trailing_activated': False,
-                'activation_price': activation_price,
-                'breakeven_stop': None
             }
 
             balance = await self.get_balance()
@@ -208,7 +175,6 @@ class TradingBot:
                    f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\n"
                    f"SL: {stop_price:.5f} ({sl_percent*100:.0f}%)\n"
                    f"TP: {take_price:.5f} ({tp_percent*100:.0f}%)\n"
-                   f"Трейлинг-стоп активируется при {activation_price:.5f}\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
 
@@ -232,15 +198,6 @@ class TradingBot:
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             del self.open_positions[symbol]
 
-            if reason == 'stop_loss':
-                self.global_loss_streak += 1
-                if self.global_loss_streak > self.config['trade_params']['martingale_steps']:
-                    self.global_loss_streak = 0
-                logger.info(f"Стоп-лосс, серия убытков: {self.global_loss_streak}")
-            else:
-                self.global_loss_streak = 0
-                logger.info(f"Тейк-профит или трейлинг-стоп, мартингейл сброшен")
-
             balance = await self.get_balance()
             emoji = "🔴" if reason == 'stop_loss' else "🟢"
             msg = f"{emoji} СДЕЛКА ЗАКРЫТА\nМонета: {symbol}\nПричина: {reason}\nЦена: {current_price:.5f}\nБаланс: {balance:.2f} USDT"
@@ -255,37 +212,16 @@ class TradingBot:
                 try:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     current_price = ticker['last']
-                    direction = pos['direction']
-
-                    # Трейлинг-стоп (безубыток)
-                    if not pos['trailing_activated']:
-                        if direction == 'LONG' and current_price >= pos['activation_price']:
-                            pos['trailing_activated'] = True
-                            pos['breakeven_stop'] = pos['entry_price'] * 1.0005  # небольшой запас на комиссию
-                            logger.info(f"{symbol}: трейлинг-стоп активирован, стоп на {pos['breakeven_stop']:.5f}")
-                            await self.send_telegram(f"🔒 {symbol}: трейлинг-стоп активирован, безубыток")
-                        elif direction == 'SHORT' and current_price <= pos['activation_price']:
-                            pos['trailing_activated'] = True
-                            pos['breakeven_stop'] = pos['entry_price'] * 0.9995
-                            logger.info(f"{symbol}: трейлинг-стоп активирован, стоп на {pos['breakeven_stop']:.5f}")
-                            await self.send_telegram(f"🔒 {symbol}: трейлинг-стоп активирован, безубыток")
-
-                    # Проверка уровней
-                    if direction == 'LONG':
+                    if pos['direction'] == 'LONG':
                         if current_price <= pos['stop_price']:
                             await self.close_position(symbol, 'stop_loss', current_price)
                         elif current_price >= pos['take_price']:
                             await self.close_position(symbol, 'take_profit', current_price)
-                        elif pos['trailing_activated'] and current_price <= pos['breakeven_stop']:
-                            await self.close_position(symbol, 'trailing_stop', current_price)
                     else:
                         if current_price >= pos['stop_price']:
                             await self.close_position(symbol, 'stop_loss', current_price)
                         elif current_price <= pos['take_price']:
                             await self.close_position(symbol, 'take_profit', current_price)
-                        elif pos['trailing_activated'] and current_price >= pos['breakeven_stop']:
-                            await self.close_position(symbol, 'trailing_stop', current_price)
-
                 except Exception as e:
                     logger.error(f"Ошибка мониторинга {symbol}: {e}")
             await asyncio.sleep(5)
@@ -295,7 +231,7 @@ class TradingBot:
             await self.heartbeat()
             logger.info(f"🔄 Начинаю сканирование {len(self.all_symbols)} монет...")
             for symbol in self.all_symbols:
-                if symbol in self.open_positions or symbol in self.blacklist:
+                if symbol in self.open_positions:
                     continue
                 try:
                     signal = await self.check_signal_combined(symbol)
@@ -308,16 +244,16 @@ class TradingBot:
             await asyncio.sleep(30)
 
     async def run(self):
-        await self.load_markets()
+        await self.exchange.load_markets()
         asyncio.create_task(self.monitor_positions())
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Бот запущен (12h + 6h, глубокий откат 0.5%)\n"
-            f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT (мартингейл 2 колена)\n"
+            f"🚀 Бот запущен (30m + 15m, монеты: {', '.join(self.all_symbols)})\n"
+            f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"SL: {self.config['trade_params']['sl_percent']*100:.0f}%, TP: {self.config['trade_params']['tp_percent']*100:.0f}%\n"
-            f"Трейлинг-стоп: активация при 50% TP\n"
+            f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
