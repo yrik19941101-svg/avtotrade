@@ -33,8 +33,7 @@ class TradingBot:
         self.telegram_bot = Bot(token=config["telegram_token"])
         self.blacklist = set()
         self.last_heartbeat = datetime.now()
-        self.tf_main = "2h"
-        self.tf_confirm = "30m"
+        self.timeframe = "30m"
 
     async def get_balance(self):
         try:
@@ -90,9 +89,9 @@ class TradingBot:
         df['ha_color'] = df.apply(lambda row: 'green' if row['ha_close'] >= row['ha_open'] else 'red', axis=1)
         return df
 
-    async def get_market_data(self, symbol, timeframe, limit=10):
+    async def get_market_data(self, symbol, limit=10):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -100,43 +99,33 @@ class TradingBot:
             if 'pause currently' in str(e) or 'not found' in str(e):
                 self.blacklist.add(symbol)
             else:
-                logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
+                logger.error(f"Ошибка данных {symbol}: {e}")
             return None
 
-    async def check_signal_on_timeframe(self, symbol, timeframe):
-        """Проверяет полный сигнал на одном таймфрейме: смена цвета + откат на следующей свече"""
-        df = await self.get_market_data(symbol, timeframe, limit=10)
+    async def check_signal(self, symbol):
+        """Проверяет сигнал: предыдущая красная, сигнальная зелёная закрылась, следующая свеча дала откат вниз (low < HA_Open)"""
+        if symbol in self.blacklist:
+            return None
+        df = await self.get_market_data(symbol, limit=10)
         if df is None or len(df) < 4:
             return None
         ha_df = self.calculate_heiken_ashi(df)
-        # Индексы: -3 (предыдущая), -2 (сигнальная закрытая), -1 (текущая незакрытая)
+        # Индексы: -3 предыдущая, -2 сигнальная (закрытая), -1 текущая (незакрытая)
         prev_color = ha_df['ha_color'].iloc[-3]
         signal_color = ha_df['ha_color'].iloc[-2]
         current_candle = ha_df.iloc[-1]
         current_ha_open = current_candle['ha_open']
 
-        # LONG: предыдущая красная, сигнальная зелёная, текущая свеча откатила вниз
+        # LONG: предыдущая красная, сигнальная зелёная, текущая свеча опустилась ниже HA_Open (откат)
         if prev_color == 'red' and signal_color == 'green':
             if current_candle['low'] < current_ha_open:
+                logger.info(f"{symbol}: сигнал LONG (откат вниз)")
                 return 'LONG'
-        # SHORT: предыдущая зелёная, сигнальная красная, текущая свеча откатила вверх
+        # SHORT: предыдущая зелёная, сигнальная красная, текущая свеча поднялась выше HA_Open (откат)
         elif prev_color == 'green' and signal_color == 'red':
             if current_candle['high'] > current_ha_open:
+                logger.info(f"{symbol}: сигнал SHORT (откат вверх)")
                 return 'SHORT'
-        return None
-
-    async def check_signal_combined(self, symbol):
-        """Сигнал считается активным, если на обоих ТФ (2h и 30m) есть полный сигнал в одном направлении"""
-        if symbol in self.blacklist:
-            return None
-        sig_main = await self.check_signal_on_timeframe(symbol, self.tf_main)
-        if sig_main is None:
-            return None
-        sig_confirm = await self.check_signal_on_timeframe(symbol, self.tf_confirm)
-        if sig_confirm is None:
-            return None
-        if sig_main == sig_confirm:
-            return sig_main
         return None
 
     async def set_leverage(self, symbol, leverage, side):
@@ -270,7 +259,7 @@ class TradingBot:
                 if symbol in self.open_positions or symbol in self.blacklist:
                     continue
                 try:
-                    signal = await self.check_signal_combined(symbol)
+                    signal = await self.check_signal(symbol)
                     if signal:
                         await self.open_position(symbol, signal)
                 except Exception as e:
@@ -285,7 +274,7 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Бот запущен (два ТФ: 2h + 30m, идеальное совпадение, зеркально)\n"
+            f"🚀 Бот запущен (строгий откат, только 30m)\n"
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT (мартингейл 2 колена)\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"SL: {self.config['trade_params']['sl_percent']*100:.0f}%, TP: {self.config['trade_params']['tp_percent']*100:.0f}%\n"
