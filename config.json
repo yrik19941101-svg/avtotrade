@@ -4,15 +4,14 @@
     "exchange": "bingx",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "max_positions": 5,
+    "max_positions": 3,
     "trade_params": {
-        "default_leverage": 40,
-        "fixed_trade_amount": 5,
-        "sl_percent": 0.8,
-        "tp_percent": 1.0,
-        "martingale_steps": 2,
-        "trailing_activation_ratio": 0.5
+        "default_leverage": 50,
+        "fixed_trade_amount": 3,
+        "sl_percent": 0.4,
+        "tp_percent": 0.6
     },
-    "timeframes": ["12h", "6h"],
+    "timeframes": ["30m", "15m"],
+    "symbols": ["TRIA/USDT", "EDGEX/USDT", "XPL/USDT"],
     "pullback_factor": 0.995
 }
