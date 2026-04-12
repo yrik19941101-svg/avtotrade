@@ -12,7 +12,7 @@
         "tp_percent": 0.6,
         "martingale_steps": 2
     },
-    "timeframes": ["2h", "1h", "30m"],
+    "timeframes": ["1h", "30m"],
     "main_timeframe": "30m",
     "heartbeat_minutes": 15,
     "heartbeat_to_telegram": true
