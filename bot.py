@@ -68,7 +68,8 @@ class TradingBot:
                    f"Время: {now.strftime('%H:%M:%S')}\n"
                    f"Открытых позиций: {len(self.open_positions)}\n"
                    f"Баланс: {balance:.2f} USDT\n"
-                   f"Серия убытков: {self.global_loss_streak}")
+                   f"Серия убытков: {self.global_loss_streak}\n"
+                   f"Проверено монет: {len(self.all_symbols)}")
             if self.heartbeat_to_telegram:
                 await self.send_telegram(msg)
             else:
@@ -77,7 +78,6 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Фильтруем только обычные крипто-фьючерсы (исключаем NCFX, NCCO и т.п.)
         self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
                             if market['swap'] and market['quote'] == 'USDT' and
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
@@ -123,15 +123,7 @@ class TradingBot:
         prev1 = ha_df['ha_color'].iloc[-2]
         current_color = ha_df['ha_color'].iloc[-1]
 
-        # Временной фильтр
-        current_time = datetime.now()
-        candle_open = df['timestamp'].iloc[-1]
-        minutes = self.timeframe_to_minutes(timeframe)
-        candle_close = candle_open + timedelta(minutes=minutes)
-        minutes_left = (candle_close - current_time).total_seconds() / 60
-        if minutes_left < minutes / 2:
-            return None
-
+        # Временной фильтр УБРАН – вход возможен в любой момент свечи
         # LONG: prev2 red, prev1 green, current red
         if prev2 == 'red' and prev1 == 'green' and current_color == 'red':
             return 'LONG'
@@ -305,6 +297,7 @@ class TradingBot:
     async def scan_symbols(self):
         while True:
             await self.heartbeat()
+            logger.info(f"🔄 Начинаю сканирование {len(self.all_symbols)} монет...")
             for symbol in self.all_symbols:
                 if symbol in self.open_positions:
                     continue
@@ -315,6 +308,7 @@ class TradingBot:
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
                 await asyncio.sleep(0.5)
+            logger.info(f"✅ Цикл сканирования завершён. Следующий через 10 секунд.")
             await asyncio.sleep(10)
 
     async def run(self):
@@ -323,13 +317,14 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Мульти-ТФ бот запущен\n"
+            f"🚀 Мульти-ТФ бот запущен (без временного фильтра)\n"
             f"Таймфреймы: {', '.join(self.timeframes)}\n"
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT (мартингейл 2 колена)\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"SL: {self.config['trade_params']['sl_percent']*100:.0f}%, TP: {self.config['trade_params']['tp_percent']*100:.0f}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
-            f"Баланс: {balance:.2f} USDT"
+            f"Баланс: {balance:.2f} USDT\n"
+            f"Heartbeat: каждые {self.heartbeat_minutes} мин"
         )
         while True:
             await asyncio.sleep(60)
