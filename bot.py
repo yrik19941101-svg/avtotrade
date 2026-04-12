@@ -37,6 +37,7 @@ class TradingBot:
         self.heartbeat_minutes = config.get('heartbeat_minutes', 15)
         self.heartbeat_to_telegram = config.get('heartbeat_to_telegram', True)
         self.last_heartbeat = datetime.now()
+        self.blacklist = set()          # символы, которые временно недоступны
 
     def timeframe_to_minutes(self, tf):
         if tf.endswith('h'):
@@ -78,6 +79,7 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
+        # Оставляем только крипто-фьючерсы (исключаем сырьевые и форекс)
         self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
                             if market['swap'] and market['quote'] == 'USDT' and
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
@@ -111,10 +113,19 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
+            # Если символ приостановлен, заносим в чёрный список
+            error_msg = str(e)
+            if 'pause currently' in error_msg or 'not found' in error_msg:
+                self.blacklist.add(symbol)
+                logger.warning(f"{symbol} добавлен в чёрный список (недоступен)")
+            else:
+                logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
             return None
 
     async def check_signal_on_timeframe(self, symbol, timeframe):
+        # Если символ в чёрном списке, не проверяем
+        if symbol in self.blacklist:
+            return None
         df = await self.get_market_data(symbol, timeframe, limit=10)
         if df is None or len(df) < 3:
             return None
@@ -123,7 +134,6 @@ class TradingBot:
         prev1 = ha_df['ha_color'].iloc[-2]
         current_color = ha_df['ha_color'].iloc[-1]
 
-        # Временной фильтр УБРАН – вход возможен в любой момент свечи
         # LONG: prev2 red, prev1 green, current red
         if prev2 == 'red' and prev1 == 'green' and current_color == 'red':
             return 'LONG'
@@ -192,7 +202,7 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * tp_percent), 5)
 
-            # Пытаемся выставить лимитные ордера TP/SL (если не получится – мониторинг)
+            # Пытаемся выставить лимитные ордера (если не получится – мониторинг)
             try:
                 await self.exchange.create_order(
                     symbol=symbol,
@@ -299,7 +309,7 @@ class TradingBot:
             await self.heartbeat()
             logger.info(f"🔄 Начинаю сканирование {len(self.all_symbols)} монет...")
             for symbol in self.all_symbols:
-                if symbol in self.open_positions:
+                if symbol in self.open_positions or symbol in self.blacklist:
                     continue
                 try:
                     signal = await self.check_signal_all_timeframes(symbol)
@@ -307,7 +317,7 @@ class TradingBot:
                         await self.open_position(symbol, signal)
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # пауза между символами
             logger.info(f"✅ Цикл сканирования завершён. Следующий через 10 секунд.")
             await asyncio.sleep(10)
 
@@ -317,14 +327,13 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Мульти-ТФ бот запущен (без временного фильтра)\n"
+            f"🚀 Мульти-ТФ бот запущен\n"
             f"Таймфреймы: {', '.join(self.timeframes)}\n"
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT (мартингейл 2 колена)\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"SL: {self.config['trade_params']['sl_percent']*100:.0f}%, TP: {self.config['trade_params']['tp_percent']*100:.0f}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
-            f"Баланс: {balance:.2f} USDT\n"
-            f"Heartbeat: каждые {self.heartbeat_minutes} мин"
+            f"Баланс: {balance:.2f} USDT"
         )
         while True:
             await asyncio.sleep(60)
