@@ -2,9 +2,8 @@ import asyncio
 import logging
 import ccxt.async_support as ccxt
 import pandas as pd
-import numpy as np
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot
 
 CONFIG_FILE = "config.json"
@@ -32,20 +31,10 @@ class TradingBot:
         self.all_symbols = []
         self.global_loss_streak = 0
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.timeframes = config['timeframes']
-        self.main_tf = config['main_timeframe']
-        self.heartbeat_minutes = config.get('heartbeat_minutes', 15)
-        self.heartbeat_to_telegram = config.get('heartbeat_to_telegram', True)
+        self.blacklist = set()
         self.last_heartbeat = datetime.now()
-        self.blacklist = set()          # символы, которые временно недоступны
-
-    def timeframe_to_minutes(self, tf):
-        if tf.endswith('h'):
-            return int(tf[:-1]) * 60
-        elif tf.endswith('m'):
-            return int(tf[:-1])
-        else:
-            return 60
+        self.tf_main = "2h"
+        self.tf_confirm = "30m"
 
     async def get_balance(self):
         try:
@@ -63,27 +52,22 @@ class TradingBot:
 
     async def heartbeat(self):
         now = datetime.now()
-        if (now - self.last_heartbeat).total_seconds() >= self.heartbeat_minutes * 60:
+        if (now - self.last_heartbeat).total_seconds() >= 900:
             balance = await self.get_balance()
             msg = (f"🟢 БОТ АКТИВЕН\n"
                    f"Время: {now.strftime('%H:%M:%S')}\n"
                    f"Открытых позиций: {len(self.open_positions)}\n"
                    f"Баланс: {balance:.2f} USDT\n"
-                   f"Серия убытков: {self.global_loss_streak}\n"
-                   f"Проверено монет: {len(self.all_symbols)}")
-            if self.heartbeat_to_telegram:
-                await self.send_telegram(msg)
-            else:
-                logger.info(msg)
+                   f"Серия убытков: {self.global_loss_streak}")
+            await self.send_telegram(msg)
             self.last_heartbeat = now
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Оставляем только крипто-фьючерсы (исключаем сырьевые и форекс)
         self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
                             if market['swap'] and market['quote'] == 'USDT' and
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
-        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар (крипто)")
+        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
 
     def get_trade_amount(self):
         base = self.config['trade_params']['fixed_trade_amount']
@@ -113,48 +97,47 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            # Если символ приостановлен, заносим в чёрный список
-            error_msg = str(e)
-            if 'pause currently' in error_msg or 'not found' in error_msg:
+            if 'pause currently' in str(e) or 'not found' in str(e):
                 self.blacklist.add(symbol)
-                logger.warning(f"{symbol} добавлен в чёрный список (недоступен)")
             else:
                 logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
             return None
 
     async def check_signal_on_timeframe(self, symbol, timeframe):
-        # Если символ в чёрном списке, не проверяем
-        if symbol in self.blacklist:
-            return None
+        """Проверяет полный сигнал на одном таймфрейме: смена цвета + откат на следующей свече"""
         df = await self.get_market_data(symbol, timeframe, limit=10)
-        if df is None or len(df) < 3:
+        if df is None or len(df) < 4:
             return None
         ha_df = self.calculate_heiken_ashi(df)
-        prev2 = ha_df['ha_color'].iloc[-3]
-        prev1 = ha_df['ha_color'].iloc[-2]
-        current_color = ha_df['ha_color'].iloc[-1]
+        # Индексы: -3 (предыдущая), -2 (сигнальная закрытая), -1 (текущая незакрытая)
+        prev_color = ha_df['ha_color'].iloc[-3]
+        signal_color = ha_df['ha_color'].iloc[-2]
+        current_candle = ha_df.iloc[-1]
+        current_ha_open = current_candle['ha_open']
 
-        # LONG: prev2 red, prev1 green, current red
-        if prev2 == 'red' and prev1 == 'green' and current_color == 'red':
-            return 'LONG'
-        # SHORT: prev2 green, prev1 red, current green
-        elif prev2 == 'green' and prev1 == 'red' and current_color == 'green':
-            return 'SHORT'
+        # LONG: предыдущая красная, сигнальная зелёная, текущая свеча откатила вниз
+        if prev_color == 'red' and signal_color == 'green':
+            if current_candle['low'] < current_ha_open:
+                return 'LONG'
+        # SHORT: предыдущая зелёная, сигнальная красная, текущая свеча откатила вверх
+        elif prev_color == 'green' and signal_color == 'red':
+            if current_candle['high'] > current_ha_open:
+                return 'SHORT'
         return None
 
-    async def check_signal_all_timeframes(self, symbol):
-        signals = []
-        for tf in self.timeframes:
-            sig = await self.check_signal_on_timeframe(symbol, tf)
-            if sig is None:
-                return None
-            signals.append(sig)
-        if all(s == 'LONG' for s in signals):
-            return 'LONG'
-        elif all(s == 'SHORT' for s in signals):
-            return 'SHORT'
-        else:
+    async def check_signal_combined(self, symbol):
+        """Сигнал считается активным, если на обоих ТФ (2h и 30m) есть полный сигнал в одном направлении"""
+        if symbol in self.blacklist:
             return None
+        sig_main = await self.check_signal_on_timeframe(symbol, self.tf_main)
+        if sig_main is None:
+            return None
+        sig_confirm = await self.check_signal_on_timeframe(symbol, self.tf_confirm)
+        if sig_confirm is None:
+            return None
+        if sig_main == sig_confirm:
+            return sig_main
+        return None
 
     async def set_leverage(self, symbol, leverage, side):
         try:
@@ -202,38 +185,14 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * tp_percent), 5)
 
-            # Пытаемся выставить лимитные ордера (если не получится – мониторинг)
-            try:
-                await self.exchange.create_order(
-                    symbol=symbol,
-                    type='stop_market',
-                    side='sell' if direction == 'LONG' else 'buy',
-                    amount=quantity,
-                    params={'stopPrice': stop_price, 'positionSide': side, 'reduceOnly': True}
-                )
-                await self.exchange.create_order(
-                    symbol=symbol,
-                    type='take_profit_market',
-                    side='sell' if direction == 'LONG' else 'buy',
-                    amount=quantity,
-                    params={'stopPrice': take_price, 'positionSide': side, 'reduceOnly': True}
-                )
-                logger.info(f"✅ Установлены лимитные ордера SL={stop_price}, TP={take_price}")
-                sl_tp_set = True
-            except Exception as e:
-                logger.warning(f"Не удалось установить лимитные ордера: {e}, буду использовать мониторинг")
-                sl_tp_set = False
-
             self.open_positions[symbol] = {
                 'direction': direction,
                 'entry_price': price,
                 'quantity': quantity,
-                'entry_time': datetime.now(),
                 'stop_price': stop_price,
                 'take_price': take_price,
                 'trade_amount': trade_amount,
                 'leverage': leverage,
-                'sl_tp_set': sl_tp_set
             }
 
             balance = await self.get_balance()
@@ -249,7 +208,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка открытия {symbol}: {e}")
 
-    async def close_position_by_monitoring(self, symbol, reason, current_price):
+    async def close_position(self, symbol, reason, current_price):
         pos = self.open_positions.get(symbol)
         if not pos:
             return
@@ -287,19 +246,18 @@ class TradingBot:
         while True:
             for symbol, pos in list(self.open_positions.items()):
                 try:
-                    if not pos.get('sl_tp_set'):
-                        ticker = await self.exchange.fetch_ticker(symbol)
-                        current_price = ticker['last']
-                        if pos['direction'] == 'LONG':
-                            if current_price <= pos['stop_price']:
-                                await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
-                            elif current_price >= pos['take_price']:
-                                await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
-                        else:
-                            if current_price >= pos['stop_price']:
-                                await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
-                            elif current_price <= pos['take_price']:
-                                await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    if pos['direction'] == 'LONG':
+                        if current_price <= pos['stop_price']:
+                            await self.close_position(symbol, 'stop_loss', current_price)
+                        elif current_price >= pos['take_price']:
+                            await self.close_position(symbol, 'take_profit', current_price)
+                    else:
+                        if current_price >= pos['stop_price']:
+                            await self.close_position(symbol, 'stop_loss', current_price)
+                        elif current_price <= pos['take_price']:
+                            await self.close_position(symbol, 'take_profit', current_price)
                 except Exception as e:
                     logger.error(f"Ошибка мониторинга {symbol}: {e}")
             await asyncio.sleep(5)
@@ -312,14 +270,14 @@ class TradingBot:
                 if symbol in self.open_positions or symbol in self.blacklist:
                     continue
                 try:
-                    signal = await self.check_signal_all_timeframes(symbol)
+                    signal = await self.check_signal_combined(symbol)
                     if signal:
                         await self.open_position(symbol, signal)
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
-                await asyncio.sleep(0.5)  # пауза между символами
-            logger.info(f"✅ Цикл сканирования завершён. Следующий через 10 секунд.")
-            await asyncio.sleep(10)
+                await asyncio.sleep(0.5)
+            logger.info(f"✅ Цикл сканирования завершён. Следующий через 30 секунд.")
+            await asyncio.sleep(30)
 
     async def run(self):
         await self.load_markets()
@@ -327,12 +285,10 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Мульти-ТФ бот запущен\n"
-            f"Таймфреймы: {', '.join(self.timeframes)}\n"
+            f"🚀 Бот запущен (два ТФ: 2h + 30m, идеальное совпадение, зеркально)\n"
             f"Сумма сделки: {self.config['trade_params']['fixed_trade_amount']} USDT (мартингейл 2 колена)\n"
             f"Плечо: {self.config['trade_params']['default_leverage']}x\n"
             f"SL: {self.config['trade_params']['sl_percent']*100:.0f}%, TP: {self.config['trade_params']['tp_percent']*100:.0f}%\n"
-            f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
