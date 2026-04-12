@@ -8,8 +8,11 @@
     "trade_params": {
         "default_leverage": 40,
         "fixed_trade_amount": 5,
-        "sl_percent": 0.4,
-        "tp_percent": 0.6,
-        "martingale_steps": 2
-    }
+        "sl_percent": 0.8,
+        "tp_percent": 1.0,
+        "martingale_steps": 2,
+        "trailing_activation_ratio": 0.5
+    },
+    "timeframes": ["12h", "6h"],
+    "pullback_factor": 0.995
 }
