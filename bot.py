@@ -2,7 +2,7 @@ import asyncio
 import logging
 import ccxt.async_support as ccxt
 import pandas as pd
-import numpy as np
+import re
 import json
 from datetime import datetime, timedelta
 from telegram import Bot
@@ -28,22 +28,24 @@ class TradingBot:
                 'adjustForTimeDifference': True
             }
         })
-        self.open_positions = {}          # символ -> данные позиции
-        self.all_symbols = []             # список всех USDT-фьючерсов
-        self.global_loss_streak = 0       # 0,1,2 (сброс после 2)
+        self.open_positions = {}
+        self.all_symbols = []
+        self.global_loss_streak = 0
         self.telegram_bot = Bot(token=config["telegram_token"])
         self.timeframes = config['timeframes']
         self.main_tf = config['main_timeframe']
-        self.tf_minutes = self.timeframe_to_minutes(self.main_tf)
-        self.tf_data = {}                 # кэш данных для каждого ТФ
+        self.last_heartbeat = None
 
-    def timeframe_to_minutes(self, tf):
-        if tf.endswith('h'):
-            return int(tf[:-1]) * 60
-        elif tf.endswith('m'):
-            return int(tf[:-1])
-        else:
-            return 60
+    def is_crypto_pair(self, symbol):
+        """Оставляем только пары с базовым активом из букв (криптовалюты)"""
+        base = symbol.split('/')[0]
+        # Исключаем сырьевые, валютные, индексы, содержащие цифры, дефисы или спецсимволы (кроме USDT)
+        if re.match(r'^[A-Z]{2,10}$', base) and len(base) >= 2:
+            # Дополнительно исключаем очевидные не-крипто: NCCO, NCFX, NCSI, NEET и т.п.
+            if base.startswith(('NCCO', 'NCFX', 'NCSI', 'NEET', 'JELLYBEAN', 'AUTISM')):
+                return False
+            return True
+        return False
 
     async def get_balance(self):
         try:
@@ -61,9 +63,11 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
-                            if market['swap'] and market['quote'] == 'USDT' and '/USDT' in symbol]
-        logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
+        all_swap = [symbol for symbol, market in self.exchange.markets.items()
+                    if market['swap'] and market['quote'] == 'USDT']
+        # Фильтруем только криптовалютные пары
+        self.all_symbols = [s for s in all_swap if self.is_crypto_pair(s)]
+        logger.info(f"Загружено {len(self.all_symbols)} крипто-фьючерсных пар (отфильтровано от сырья и валют)")
 
     def get_trade_amount(self):
         base = self.config['trade_params']['fixed_trade_amount']
@@ -93,11 +97,12 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
+            # Слишком много ошибок по приостановленным парам – логируем только раз в час
+            if 'pause currently' not in str(e):
+                logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
             return None
 
     async def check_signal_on_timeframe(self, symbol, timeframe):
-        """Возвращает 'LONG', 'SHORT' или None, если сигнал активен на данном ТФ"""
         df = await self.get_market_data(symbol, timeframe, limit=10)
         if df is None or len(df) < 3:
             return None
@@ -106,7 +111,6 @@ class TradingBot:
         prev1 = ha_df['ha_color'].iloc[-2]
         current_color = ha_df['ha_color'].iloc[-1]
 
-        # Проверка времени до закрытия текущей свечи
         current_time = datetime.now()
         candle_open = df['timestamp'].iloc[-1]
         minutes = self.timeframe_to_minutes(timeframe)
@@ -115,23 +119,27 @@ class TradingBot:
         if minutes_left < minutes / 2:
             return None
 
-        # LONG сигнал: prev2 red, prev1 green, current red
         if prev2 == 'red' and prev1 == 'green' and current_color == 'red':
             return 'LONG'
-        # SHORT сигнал: prev2 green, prev1 red, current green
         elif prev2 == 'green' and prev1 == 'red' and current_color == 'green':
             return 'SHORT'
         return None
 
+    def timeframe_to_minutes(self, tf):
+        if tf.endswith('h'):
+            return int(tf[:-1]) * 60
+        elif tf.endswith('m'):
+            return int(tf[:-1])
+        else:
+            return 60
+
     async def check_signal_all_timeframes(self, symbol):
-        """Проверяет все ТФ, возвращает направление только если все ТФ дают одинаковый сигнал"""
         signals = []
         for tf in self.timeframes:
             sig = await self.check_signal_on_timeframe(symbol, tf)
             if sig is None:
                 return None
             signals.append(sig)
-        # Все сигналы должны быть одинаковыми (LONG или SHORT)
         if all(s == 'LONG' for s in signals):
             return 'LONG'
         elif all(s == 'SHORT' for s in signals):
@@ -167,7 +175,6 @@ class TradingBot:
 
             await self.set_leverage(symbol, leverage, side)
 
-            # Открываем рыночный ордер
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -177,9 +184,8 @@ class TradingBot:
             )
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
 
-            # Рассчитываем SL и TP
-            sl_percent = self.config['trade_params']['sl_percent']   # 0.4 (40% от суммы -> цена 1%)
-            tp_percent = self.config['trade_params']['tp_percent']   # 0.6 (60% от суммы -> цена 1.5%)
+            sl_percent = self.config['trade_params']['sl_percent']
+            tp_percent = self.config['trade_params']['tp_percent']
             if direction == 'LONG':
                 stop_price = round(price * (1 - (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 + (1/leverage) * tp_percent), 5)
@@ -187,28 +193,25 @@ class TradingBot:
                 stop_price = round(price * (1 + (1/leverage) * sl_percent), 5)
                 take_price = round(price * (1 - (1/leverage) * tp_percent), 5)
 
-            # Пытаемся выставить лимитные ордера TP/SL
-            order_sl = None
-            order_tp = None
+            # Пытаемся выставить лимитные ордера (не критично)
             try:
-                # Для BingX в режиме Hedge можно использовать reduceOnly
-                sl_order = await self.exchange.create_order(
+                await self.exchange.create_order(
                     symbol=symbol,
                     type='stop_market',
                     side='sell' if direction == 'LONG' else 'buy',
                     amount=quantity,
                     params={'stopPrice': stop_price, 'positionSide': side, 'reduceOnly': True}
                 )
-                tp_order = await self.exchange.create_order(
+                await self.exchange.create_order(
                     symbol=symbol,
                     type='take_profit_market',
                     side='sell' if direction == 'LONG' else 'buy',
                     amount=quantity,
                     params={'stopPrice': take_price, 'positionSide': side, 'reduceOnly': True}
                 )
-                logger.info(f"✅ Установлены лимитные ордера SL={stop_price}, TP={take_price} для {symbol}")
+                logger.info(f"✅ Лимитные ордера SL/TP установлены для {symbol}")
             except Exception as e:
-                logger.warning(f"Не удалось установить лимитные ордера для {symbol}: {e}. Будет использован мониторинг.")
+                logger.warning(f"Не удалось установить лимитные ордера для {symbol}: {e}")
 
             self.open_positions[symbol] = {
                 'direction': direction,
@@ -218,9 +221,7 @@ class TradingBot:
                 'stop_price': stop_price,
                 'take_price': take_price,
                 'trade_amount': trade_amount,
-                'leverage': leverage,
-                'sl_order_id': sl_order.get('id') if sl_order else None,
-                'tp_order_id': tp_order.get('id') if tp_order else None
+                'leverage': leverage
             }
 
             balance = await self.get_balance()
@@ -229,7 +230,7 @@ class TradingBot:
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
                    f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\n"
                    f"SL: {stop_price:.5f} ({sl_percent*100:.0f}% от суммы)\n"
-                   f"TP: {take_price:.5f} ({tp_percent*100:.0f}% от суммы)\n"
+                   f"TP: {take_price:.5f} ({tp_percent*100:.0f}%)\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
 
@@ -253,13 +254,12 @@ class TradingBot:
             logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
             del self.open_positions[symbol]
 
-            # Обновляем глобальный мартингейл
             if reason == 'stop_loss':
                 self.global_loss_streak += 1
                 if self.global_loss_streak > self.config['trade_params']['martingale_steps']:
                     self.global_loss_streak = 0
                 logger.info(f"Стоп-лосс, серия убытков: {self.global_loss_streak}")
-            else:  # take_profit
+            else:
                 self.global_loss_streak = 0
                 logger.info(f"Тейк-профит, мартингейл сброшен")
 
@@ -277,24 +277,32 @@ class TradingBot:
                 try:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     current_price = ticker['last']
-                    # Если нет лимитных ордеров или они не сработали, проверяем цены сами
-                    if not pos.get('sl_order_id') or not pos.get('tp_order_id'):
-                        if pos['direction'] == 'LONG':
-                            if current_price <= pos['stop_price']:
-                                await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
-                            elif current_price >= pos['take_price']:
-                                await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
-                        else:
-                            if current_price >= pos['stop_price']:
-                                await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
-                            elif current_price <= pos['take_price']:
-                                await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
+                    if pos['direction'] == 'LONG':
+                        if current_price <= pos['stop_price']:
+                            await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
+                        elif current_price >= pos['take_price']:
+                            await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
+                    else:
+                        if current_price >= pos['stop_price']:
+                            await self.close_position_by_monitoring(symbol, 'stop_loss', current_price)
+                        elif current_price <= pos['take_price']:
+                            await self.close_position_by_monitoring(symbol, 'take_profit', current_price)
                 except Exception as e:
                     logger.error(f"Ошибка мониторинга {symbol}: {e}")
             await asyncio.sleep(5)
 
-    async def scan_symbols(self):
+    async def heartbeat(self):
+        """Периодически пишем в лог о состоянии бота"""
         while True:
+            balance = await self.get_balance()
+            logger.info(f"❤️ Heartbeat: открыто позиций {len(self.open_positions)}, баланс {balance:.2f} USDT, всего пар {len(self.all_symbols)}")
+            await asyncio.sleep(300)  # каждые 5 минут
+
+    async def scan_symbols(self):
+        cycle = 0
+        while True:
+            start_time = datetime.now()
+            checked = 0
             for symbol in self.all_symbols:
                 if symbol in self.open_positions:
                     continue
@@ -304,13 +312,17 @@ class TradingBot:
                         await self.open_position(symbol, signal)
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
-                await asyncio.sleep(1)  # небольшая задержка между символами
-            await asyncio.sleep(10)     # полный цикл каждые 10 секунд
+                checked += 1
+                await asyncio.sleep(0.5)  # задержка между символами
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Цикл сканирования завершён за {elapsed:.1f} сек, проверено {checked} символов")
+            await asyncio.sleep(10)
 
     async def run(self):
         await self.load_markets()
         asyncio.create_task(self.monitor_positions())
         asyncio.create_task(self.scan_symbols())
+        asyncio.create_task(self.heartbeat())
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 Мульти-ТФ бот запущен\n"
@@ -321,7 +333,6 @@ class TradingBot:
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
         )
-        # Бесконечное ожидание (всё делается в тасках)
         while True:
             await asyncio.sleep(60)
 
