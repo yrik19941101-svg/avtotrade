@@ -99,24 +99,25 @@ class TradingBot:
         return None
 
     async def get_min_amount(self, symbol):
-        """Возвращает минимальное количество для символа (из market['limits']['amount']['min'])"""
         market = self.exchange.market(symbol)
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def open_first_order(self, symbol, price, side):
         trade_amount = self.config['trade_params']['base_amount']
+        # Если инверсия включена, меняем сторону
+        if self.config.get('invert_signal', False):
+            side = 'SHORT' if side == 'LONG' else 'LONG'
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
             quantity = trade_amount / price
             min_amount = await self.get_min_amount(symbol)
             if quantity < min_amount:
-                logger.warning(f"{symbol}: количество {quantity} меньше минимального {min_amount}, пропускаем")
+                logger.warning(f"{symbol}: количество {quantity} < {min_amount}, пропускаем")
                 self.blacklist.add(symbol)
                 return False
             quantity = round(quantity, 5)
             if quantity <= 0:
                 return False
-
             order = await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -141,7 +142,6 @@ class TradingBot:
             return True
         except Exception as e:
             logger.error(f"Ошибка открытия первого ордера {symbol}: {e}")
-            # Если ошибка связана с минимальным количеством, добавляем в чёрный список
             if 'minimum amount' in str(e).lower():
                 self.blacklist.add(symbol)
             return False
@@ -151,34 +151,29 @@ class TradingBot:
             return
         if self.position['step'] >= self.config['trade_params']['max_steps']:
             return
-
         last_order = self.position['orders'][-1]
         step_percent = self.config['trade_params']['step_percent']
         side = self.position['side']
-
         if side == 'LONG':
             if current_price >= last_order['price'] * (1 - step_percent / 100):
                 return
         else:
             if current_price <= last_order['price'] * (1 + step_percent / 100):
                 return
-
         new_step = self.position['step'] + 1
         multiplier = self.config['trade_params']['martingale_multiplier']
         prev_amount = last_order['amount']
         new_amount = prev_amount * multiplier
         order_side = 'buy' if side == 'LONG' else 'sell'
-
         try:
             quantity = new_amount / current_price
             min_amount = await self.get_min_amount(symbol)
             if quantity < min_amount:
-                logger.warning(f"{symbol}: количество {quantity} меньше минимального {min_amount}, не добавляем ордер")
+                logger.warning(f"{symbol}: количество {quantity} < {min_amount}, не добавляем ордер")
                 return
             quantity = round(quantity, 5)
             if quantity <= 0:
                 return
-
             order = await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -193,7 +188,6 @@ class TradingBot:
             avg_price = sum(o['price'] * o['quantity'] for o in self.position['orders']) / total_qty
             self.position['avg_price'] = avg_price
             self.position['total_qty'] = total_qty
-
             balance = await self.get_balance()
             msg = (f"🟡 УСРЕДНЕНИЕ (шаг {new_step})\n"
                    f"Монета: {symbol}\nЦена: {current_price:.5f}\nСумма: {new_amount:.2f} USDT\n"
@@ -283,11 +277,11 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 БОТ ЗАПУЩЕН (LONG/SHORT, мартингейл до 5 шагов)\n"
-            f"Сумма: {self.config['trade_params']['base_amount']} USDT\n"
+            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, сумма {self.config['trade_params']['base_amount']} USDT)\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
             f"TP: {self.config['trade_params']['tp_percent']}%\n"
+            f"Инверсия сигнала: {self.config.get('invert_signal', False)}\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
