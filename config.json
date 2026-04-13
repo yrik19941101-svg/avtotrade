@@ -9,9 +9,9 @@
     "max_positions": 20,
     "trade_params": {
         "base_amount": 30,
-        "martingale_multiplier": 1.5,
+        "martingale_multiplier": 2.5,
         "max_steps": 5,
-        "step_percent": 1.0,
+        "step_percent": 1.5,
         "tp_percent": 0.5
     }
 }
