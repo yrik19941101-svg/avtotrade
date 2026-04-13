@@ -7,7 +7,7 @@
     "trend_tf": "1h",
     "trend_tf2": "4h",
     "trade_params": {
-        "base_amount": 2,
+        "base_amount": 5,
         "martingale_multiplier": 1.5,
         "max_steps": 5,
         "step_percent": 2.0,
