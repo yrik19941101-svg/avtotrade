@@ -8,7 +8,7 @@
     "trend_tf2": "4h",
     "max_positions": 20,
     "trade_params": {
-        "base_amount": 10,
+        "base_amount": 30,
         "martingale_multiplier": 1.5,
         "max_steps": 5,
         "step_percent": 1.0,
