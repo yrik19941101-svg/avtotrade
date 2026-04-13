@@ -28,7 +28,7 @@ class TradingBot:
             }
         })
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.position = None   # { 'symbol', 'side', 'orders', 'step', 'avg_price', 'total_qty' }
+        self.position = None
         self.all_symbols = []
         self.blacklist = set()
         self.last_heartbeat = datetime.now()
@@ -86,7 +86,6 @@ class TradingBot:
             return None
 
     async def check_trend(self, symbol):
-        """Возвращает 'LONG', 'SHORT' или None, если тренды на 1h и 4h совпадают"""
         ema50_1h, close_1h = await self.get_ema(symbol, self.config['trend_tf'], 50)
         ema50_4h, close_4h = await self.get_ema(symbol, self.config['trend_tf2'], 50)
         if ema50_1h is None or ema50_4h is None:
@@ -99,11 +98,21 @@ class TradingBot:
             return 'SHORT'
         return None
 
+    async def get_min_amount(self, symbol):
+        """Возвращает минимальное количество для символа (из market['limits']['amount']['min'])"""
+        market = self.exchange.market(symbol)
+        return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
+
     async def open_first_order(self, symbol, price, side):
         trade_amount = self.config['trade_params']['base_amount']
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
             quantity = trade_amount / price
+            min_amount = await self.get_min_amount(symbol)
+            if quantity < min_amount:
+                logger.warning(f"{symbol}: количество {quantity} меньше минимального {min_amount}, пропускаем")
+                self.blacklist.add(symbol)
+                return False
             quantity = round(quantity, 5)
             if quantity <= 0:
                 return False
@@ -132,6 +141,9 @@ class TradingBot:
             return True
         except Exception as e:
             logger.error(f"Ошибка открытия первого ордера {symbol}: {e}")
+            # Если ошибка связана с минимальным количеством, добавляем в чёрный список
+            if 'minimum amount' in str(e).lower():
+                self.blacklist.add(symbol)
             return False
 
     async def add_martingale_order(self, symbol, current_price):
@@ -145,11 +157,9 @@ class TradingBot:
         side = self.position['side']
 
         if side == 'LONG':
-            # Усреднение при падении цены на step_percent% от последнего ордера
             if current_price >= last_order['price'] * (1 - step_percent / 100):
                 return
-        else:  # SHORT
-            # Усреднение при росте цены на step_percent% от последнего ордера
+        else:
             if current_price <= last_order['price'] * (1 + step_percent / 100):
                 return
 
@@ -161,6 +171,10 @@ class TradingBot:
 
         try:
             quantity = new_amount / current_price
+            min_amount = await self.get_min_amount(symbol)
+            if quantity < min_amount:
+                logger.warning(f"{symbol}: количество {quantity} меньше минимального {min_amount}, не добавляем ордер")
+                return
             quantity = round(quantity, 5)
             if quantity <= 0:
                 return
@@ -198,7 +212,7 @@ class TradingBot:
             target_price = avg_price * (1 + tp_percent / 100)
             if current_price >= target_price:
                 await self.close_all(symbol, current_price, 'take_profit')
-        else:  # SHORT
+        else:
             target_price = avg_price * (1 - tp_percent / 100)
             if current_price <= target_price:
                 await self.close_all(symbol, current_price, 'take_profit')
@@ -255,11 +269,10 @@ class TradingBot:
                     trend = await self.check_trend(symbol)
                     if trend is None:
                         continue
-                    # Если тренд определён, открываем первый ордер (без дополнительного сигнала)
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
                     await self.open_first_order(symbol, price, trend)
-                    break  # одна активная позиция
+                    break
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
                 await asyncio.sleep(0.5)
