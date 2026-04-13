@@ -6,6 +6,7 @@
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
     "trend_tf": "1h",
     "trend_tf2": "4h",
+    "invert_signal": false,
     "trade_params": {
         "base_amount": 5,
         "martingale_multiplier": 1.5,
