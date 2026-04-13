@@ -2,7 +2,6 @@ import asyncio
 import logging
 import ccxt.async_support as ccxt
 import pandas as pd
-import numpy as np
 import json
 from datetime import datetime
 from telegram import Bot
@@ -28,19 +27,18 @@ class TradingBot:
                 'adjustForTimeDifference': True
             }
         })
-        self.open_positions = {}          # symbol -> position data
-        self.all_symbols = []             # filtered list of tradable symbols
+        self.open_positions = {}
+        self.all_symbols = []
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.blacklist = set()            # symbols that are paused or not found
+        self.blacklist = set()
         self.last_heartbeat = datetime.now()
-        self.trend_tf = "1h"
-        self.signal_tf = "15m"
-        self.trade_amount = self.config['trade_params']['fixed_trade_amount']
-        self.leverage = self.config['trade_params']['default_leverage']
-        self.sl_percent = self.config['trade_params']['sl_percent']     # 0.5
-        self.tp_percent = self.config['trade_params']['tp_percent']     # 1.0
-        self.partial_close_ratio = self.config['trade_params']['partial_close_ratio']  # 0.5
-        self.trailing_buffer = self.config['trade_params']['trailing_buffer']          # 0.0005 (0.05%)
+        self.timeframes = config["timeframes"]
+        self.trade_amount = config['trade_params']['fixed_trade_amount']
+        self.leverage = config['trade_params']['default_leverage']
+        self.sl_percent = config['trade_params']['sl_percent']
+        self.tp_percent = config['trade_params']['tp_percent']
+        self.partial_close_ratio = config['trade_params']['partial_close_ratio']
+        self.trailing_buffer = config['trade_params']['trailing_buffer']
 
     async def get_balance(self):
         try:
@@ -69,7 +67,6 @@ class TradingBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Фильтруем: swap, quote USDT, только крипто (исключаем сырьевые и форекс)
         self.all_symbols = [symbol for symbol, market in self.exchange.markets.items()
                             if market['swap'] and market['quote'] == 'USDT' and
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
@@ -100,22 +97,9 @@ class TradingBot:
                 logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
             return None
 
-    async def check_trend_1h(self, symbol):
-        """Возвращает 'LONG' если цена выше EMA50, 'SHORT' если ниже, иначе None"""
-        df = await self.get_market_data(symbol, self.trend_tf, limit=20)
-        if df is None or len(df) < 20:
-            return None
-        ema50 = df['close'].ewm(span=50, adjust=False).mean()
-        last_close = df['close'].iloc[-1]
-        if last_close > ema50.iloc[-1]:
-            return 'LONG'
-        elif last_close < ema50.iloc[-1]:
-            return 'SHORT'
-        return None
-
-    async def check_signal_15m(self, symbol):
-        """Сигнал Heiken Ashi: предыдущая красная, сигнальная зелёная закрылась, следующая свеча откатила вниз (low < HA_Open)"""
-        df = await self.get_market_data(symbol, self.signal_tf, limit=10)
+    async def check_signal_on_timeframe(self, symbol, timeframe):
+        """Возвращает 'LONG' или 'SHORT' если на данном ТФ активен сигнал, иначе None"""
+        df = await self.get_market_data(symbol, timeframe, limit=10)
         if df is None or len(df) < 4:
             return None
         ha_df = self.calculate_heiken_ashi(df)
@@ -133,17 +117,21 @@ class TradingBot:
         return None
 
     async def check_signal_combined(self, symbol):
+        """Проверяет сигналы на обоих ТФ. Возвращает направление для ВХОДА (противоположное)"""
         if symbol in self.blacklist:
             return None
-        trend = await self.check_trend_1h(symbol)
-        if trend is None:
+        sig1 = await self.check_signal_on_timeframe(symbol, self.timeframes[0])
+        if sig1 is None:
             return None
-        signal = await self.check_signal_15m(symbol)
-        if signal is None:
+        sig2 = await self.check_signal_on_timeframe(symbol, self.timeframes[1])
+        if sig2 is None:
             return None
-        if trend == signal:
-            return signal
-        return None
+        if sig1 != sig2:
+            return None
+        # Сигналы совпадают, открываем противоположную сделку
+        opposite = 'SHORT' if sig1 == 'LONG' else 'LONG'
+        logger.info(f"{symbol}: сигналы {sig1} на {self.timeframes[0]} и {sig2} на {self.timeframes[1]} -> вход {opposite}")
+        return opposite
 
     async def set_leverage(self, symbol, leverage, side):
         try:
@@ -182,10 +170,8 @@ class TradingBot:
             )
             logger.info(f"🟢 ОТКРЫТА {direction} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
 
-            # Расчёт уровней SL и TP (в цене)
             sl_price = price * (1 - (1/leverage) * self.sl_percent) if direction == 'LONG' else price * (1 + (1/leverage) * self.sl_percent)
             tp_price = price * (1 + (1/leverage) * self.tp_percent) if direction == 'LONG' else price * (1 - (1/leverage) * self.tp_percent)
-            # Цена для частичного закрытия (50% от TP)
             partial_price = price + (tp_price - price) * self.partial_close_ratio if direction == 'LONG' else price - (price - tp_price) * self.partial_close_ratio
 
             self.open_positions[symbol] = {
@@ -202,7 +188,7 @@ class TradingBot:
 
             balance = await self.get_balance()
             emoji = "🟢" if direction == 'LONG' else "🔴"
-            msg = (f"{emoji} ОТКРЫТА СДЕЛКА {direction}\n"
+            msg = (f"{emoji} ОТКРЫТА СДЕЛКА {direction} (инверсия сигнала)\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
                    f"Плечо: {leverage}x\nКол-во: {quantity:.5f}\n"
                    f"SL: {sl_price:.5f} ({self.sl_percent*100:.0f}%)\n"
@@ -233,11 +219,9 @@ class TradingBot:
             )
             logger.info(f"🔴 ЗАКРЫТА часть {quantity} {symbol} по {reason}, цена {current_price}")
 
-            # Обновляем остаток или удаляем позицию
             if close_quantity is not None and close_quantity < pos['quantity']:
                 pos['quantity'] -= close_quantity
                 pos['trade_amount'] = (pos['trade_amount'] / (pos['quantity'] + close_quantity)) * pos['quantity']
-                # После частичного закрытия подтягиваем стоп-лосс к безубытку + буфер
                 new_sl = pos['entry_price'] * (1 + self.trailing_buffer) if pos['direction'] == 'LONG' else pos['entry_price'] * (1 - self.trailing_buffer)
                 pos['sl_price'] = new_sl
                 logger.info(f"{symbol}: трейлинг-стоп обновлён до безубытка {new_sl:.5f}")
@@ -261,7 +245,6 @@ class TradingBot:
                     current_price = ticker['last']
                     direction = pos['direction']
 
-                    # Проверка частичного закрытия
                     if not pos.get('partial_closed'):
                         if direction == 'LONG' and current_price >= pos['partial_price']:
                             half_qty = pos['quantity'] * self.partial_close_ratio
@@ -272,12 +255,10 @@ class TradingBot:
                             await self.close_position(symbol, 'partial_take_profit', current_price, half_qty)
                             pos['partial_closed'] = True
 
-                    # Проверка стоп-лосса (уже может быть обновлён после частичного закрытия)
                     if direction == 'LONG' and current_price <= pos['sl_price']:
                         await self.close_position(symbol, 'stop_loss', current_price)
                     elif direction == 'SHORT' and current_price >= pos['sl_price']:
                         await self.close_position(symbol, 'stop_loss', current_price)
-                    # Проверка тейк-профита
                     elif direction == 'LONG' and current_price >= pos['tp_price']:
                         await self.close_position(symbol, 'take_profit', current_price)
                     elif direction == 'SHORT' and current_price <= pos['tp_price']:
@@ -310,7 +291,7 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 Бот запущен (1h EMA50 тренд + 15m Heikin Ashi откат)\n"
+            f"🚀 Бот запущен (инвертированная стратегия: сигналы 1h+15m совпадают -> вход противоположный)\n"
             f"Сумма сделки: {self.trade_amount} USDT\n"
             f"Плечо: {self.leverage}x\n"
             f"SL: {self.sl_percent*100:.0f}% от суммы, TP: {self.tp_percent*100:.0f}%\n"
