@@ -11,7 +11,7 @@
         "base_amount": 10,
         "martingale_multiplier": 1.5,
         "max_steps": 5,
-        "step_percent": 2.0,
-        "tp_percent": 3.0
+        "step_percent": 1.0,
+        "tp_percent": 0.5
     }
 }
