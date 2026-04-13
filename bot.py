@@ -28,7 +28,7 @@ class TradingBot:
             }
         })
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.position = None
+        self.positions = {}   # symbol -> position data
         self.all_symbols = []
         self.blacklist = set()
         self.last_heartbeat = datetime.now()
@@ -53,7 +53,7 @@ class TradingBot:
             balance = await self.get_balance()
             msg = (f"🟢 БОТ АКТИВЕН\n"
                    f"Время: {now.strftime('%H:%M:%S')}\n"
-                   f"Позиция: {'есть' if self.position else 'нет'}\n"
+                   f"Открытых позиций: {len(self.positions)}\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
             self.last_heartbeat = now
@@ -102,11 +102,10 @@ class TradingBot:
         market = self.exchange.market(symbol)
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
-    async def open_first_order(self, symbol, price, side):
+    async def open_first_order(self, symbol, price, trend):
+        # Инверсия: если тренд LONG -> открываем SHORT, если SHORT -> LONG
+        side = 'SHORT' if trend == 'LONG' else 'LONG'
         trade_amount = self.config['trade_params']['base_amount']
-        # Если инверсия включена, меняем сторону
-        if self.config.get('invert_signal', False):
-            side = 'SHORT' if side == 'LONG' else 'LONG'
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
             quantity = trade_amount / price
@@ -126,8 +125,7 @@ class TradingBot:
                 params={'positionSide': side}
             )
             logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
-            self.position = {
-                'symbol': symbol,
+            self.positions[symbol] = {
                 'side': side,
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
                 'step': 1,
@@ -147,20 +145,21 @@ class TradingBot:
             return False
 
     async def add_martingale_order(self, symbol, current_price):
-        if not self.position or self.position['symbol'] != symbol:
+        if symbol not in self.positions:
             return
-        if self.position['step'] >= self.config['trade_params']['max_steps']:
+        pos = self.positions[symbol]
+        if pos['step'] >= self.config['trade_params']['max_steps']:
             return
-        last_order = self.position['orders'][-1]
+        last_order = pos['orders'][-1]
         step_percent = self.config['trade_params']['step_percent']
-        side = self.position['side']
+        side = pos['side']
         if side == 'LONG':
             if current_price >= last_order['price'] * (1 - step_percent / 100):
                 return
         else:
             if current_price <= last_order['price'] * (1 + step_percent / 100):
                 return
-        new_step = self.position['step'] + 1
+        new_step = pos['step'] + 1
         multiplier = self.config['trade_params']['martingale_multiplier']
         prev_amount = last_order['amount']
         new_amount = prev_amount * multiplier
@@ -182,12 +181,12 @@ class TradingBot:
                 params={'positionSide': side}
             )
             logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount} USDT")
-            self.position['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
-            self.position['step'] = new_step
-            total_qty = sum(o['quantity'] for o in self.position['orders'])
-            avg_price = sum(o['price'] * o['quantity'] for o in self.position['orders']) / total_qty
-            self.position['avg_price'] = avg_price
-            self.position['total_qty'] = total_qty
+            pos['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
+            pos['step'] = new_step
+            total_qty = sum(o['quantity'] for o in pos['orders'])
+            avg_price = sum(o['price'] * o['quantity'] for o in pos['orders']) / total_qty
+            pos['avg_price'] = avg_price
+            pos['total_qty'] = total_qty
             balance = await self.get_balance()
             msg = (f"🟡 УСРЕДНЕНИЕ (шаг {new_step})\n"
                    f"Монета: {symbol}\nЦена: {current_price:.5f}\nСумма: {new_amount:.2f} USDT\n"
@@ -197,11 +196,12 @@ class TradingBot:
             logger.error(f"Ошибка добавления ордера {symbol}: {e}")
 
     async def check_take_profit(self, symbol, current_price):
-        if not self.position or self.position['symbol'] != symbol:
+        if symbol not in self.positions:
             return
-        avg_price = self.position['avg_price']
+        pos = self.positions[symbol]
+        avg_price = pos['avg_price']
         tp_percent = self.config['trade_params']['tp_percent']
-        side = self.position['side']
+        side = pos['side']
         if side == 'LONG':
             target_price = avg_price * (1 + tp_percent / 100)
             if current_price >= target_price:
@@ -212,10 +212,11 @@ class TradingBot:
                 await self.close_all(symbol, current_price, 'take_profit')
 
     async def close_all(self, symbol, current_price, reason):
-        if not self.position or self.position['symbol'] != symbol:
+        if symbol not in self.positions:
             return
-        total_qty = self.position['total_qty']
-        side = self.position['side']
+        pos = self.positions[symbol]
+        total_qty = pos['total_qty']
+        side = pos['side']
         close_side = 'sell' if side == 'LONG' else 'buy'
         try:
             await self.exchange.create_order(
@@ -231,14 +232,11 @@ class TradingBot:
                    f"Монета: {symbol}\nПричина: {reason}\n"
                    f"Цена закрытия: {current_price:.5f}\nБаланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
-            self.position = None
+            del self.positions[symbol]
         except Exception as e:
             logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
 
-    async def monitor_position(self):
-        if not self.position:
-            return
-        symbol = self.position['symbol']
+    async def monitor_position(self, symbol):
         try:
             ticker = await self.exchange.fetch_ticker(symbol)
             current_price = ticker['last']
@@ -250,14 +248,17 @@ class TradingBot:
     async def scan_symbols(self):
         while True:
             await self.heartbeat()
-            if self.position:
-                await self.monitor_position()
+            # Мониторим открытые позиции
+            for symbol in list(self.positions.keys()):
+                await self.monitor_position(symbol)
+            # Если достигнут лимит позиций, не ищем новые
+            if len(self.positions) >= self.config['max_positions']:
                 await asyncio.sleep(5)
                 continue
 
             logger.info(f"🔄 Сканирование {len(self.all_symbols)} монет...")
             for symbol in self.all_symbols:
-                if symbol in self.blacklist:
+                if symbol in self.blacklist or symbol in self.positions:
                     continue
                 try:
                     trend = await self.check_trend(symbol)
@@ -266,7 +267,9 @@ class TradingBot:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
                     await self.open_first_order(symbol, price, trend)
-                    break
+                    # Если открыли позицию, переходим к следующему циклу (чтобы не превысить лимит)
+                    if len(self.positions) >= self.config['max_positions']:
+                        break
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
                 await asyncio.sleep(0.5)
@@ -277,11 +280,12 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, сумма {self.config['trade_params']['base_amount']} USDT)\n"
+            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, инверсия сигнала)\n"
+            f"Сумма: {self.config['trade_params']['base_amount']} USDT\n"
+            f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
             f"TP: {self.config['trade_params']['tp_percent']}%\n"
-            f"Инверсия сигнала: {self.config.get('invert_signal', False)}\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
