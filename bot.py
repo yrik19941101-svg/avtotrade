@@ -28,7 +28,7 @@ class TradingBot:
             }
         })
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.position = None
+        self.position = None   # { 'symbol', 'side', 'orders', 'step', 'avg_price', 'total_qty' }
         self.all_symbols = []
         self.blacklist = set()
         self.last_heartbeat = datetime.now()
@@ -65,14 +65,14 @@ class TradingBot:
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
         logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
 
-    async def get_ema(self, symbol, timeframe, period, limit=100):
+    async def get_ema(self, symbol, timeframe, period, limit=150):
         df = await self.get_market_data(symbol, timeframe, limit)
         if df is None or len(df) < period:
             return None, None
         ema = df['close'].ewm(span=period, adjust=False).mean()
         return ema.iloc[-1], df['close'].iloc[-1]
 
-    async def get_market_data(self, symbol, timeframe, limit=100):
+    async def get_market_data(self, symbol, timeframe, limit=150):
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -86,23 +86,22 @@ class TradingBot:
             return None
 
     async def check_trend(self, symbol):
-        if not self.config.get('use_trend_filter', False):
-            return True
-        ema50, last_close = await self.get_ema(symbol, self.config['trend_tf'], 50)
-        if ema50 is None:
-            return False
-        return last_close > ema50
+        """Возвращает 'LONG', 'SHORT' или None, если тренды на 1h и 4h совпадают"""
+        ema50_1h, close_1h = await self.get_ema(symbol, self.config['trend_tf'], 50)
+        ema50_4h, close_4h = await self.get_ema(symbol, self.config['trend_tf2'], 50)
+        if ema50_1h is None or ema50_4h is None:
+            return None
+        long_condition = (close_1h > ema50_1h) and (close_4h > ema50_4h)
+        short_condition = (close_1h < ema50_1h) and (close_4h < ema50_4h)
+        if long_condition:
+            return 'LONG'
+        if short_condition:
+            return 'SHORT'
+        return None
 
-    async def check_signal(self, symbol):
-        ema20, last_close = await self.get_ema(symbol, self.config['signal_tf'], 20)
-        if ema20 is None:
-            return False
-        return last_close > ema20
-
-    async def open_first_order(self, symbol, price):
+    async def open_first_order(self, symbol, price, side):
         trade_amount = self.config['trade_params']['base_amount']
-        side = 'LONG'
-        order_side = 'buy'
+        order_side = 'buy' if side == 'LONG' else 'sell'
         try:
             quantity = trade_amount / price
             quantity = round(quantity, 5)
@@ -116,16 +115,17 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
+            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
             self.position = {
                 'symbol': symbol,
+                'side': side,
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
                 'step': 1,
                 'avg_price': price,
                 'total_qty': quantity
             }
             balance = await self.get_balance()
-            msg = (f"🟢 ПЕРВЫЙ ОРДЕР LONG\n"
+            msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
@@ -142,15 +142,22 @@ class TradingBot:
 
         last_order = self.position['orders'][-1]
         step_percent = self.config['trade_params']['step_percent']
-        if current_price >= last_order['price'] * (1 - step_percent / 100):
-            return
+        side = self.position['side']
+
+        if side == 'LONG':
+            # Усреднение при падении цены на step_percent% от последнего ордера
+            if current_price >= last_order['price'] * (1 - step_percent / 100):
+                return
+        else:  # SHORT
+            # Усреднение при росте цены на step_percent% от последнего ордера
+            if current_price <= last_order['price'] * (1 + step_percent / 100):
+                return
 
         new_step = self.position['step'] + 1
         multiplier = self.config['trade_params']['martingale_multiplier']
         prev_amount = last_order['amount']
         new_amount = prev_amount * multiplier
-        order_side = 'buy'
-        side = 'LONG'
+        order_side = 'buy' if side == 'LONG' else 'sell'
 
         try:
             quantity = new_amount / current_price
@@ -165,7 +172,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {symbol} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount} USDT")
+            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount} USDT")
             self.position['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
             self.position['step'] = new_step
             total_qty = sum(o['quantity'] for o in self.position['orders'])
@@ -186,21 +193,29 @@ class TradingBot:
             return
         avg_price = self.position['avg_price']
         tp_percent = self.config['trade_params']['tp_percent']
-        target_price = avg_price * (1 + tp_percent / 100)
-        if current_price >= target_price:
-            await self.close_all(symbol, current_price, 'take_profit')
+        side = self.position['side']
+        if side == 'LONG':
+            target_price = avg_price * (1 + tp_percent / 100)
+            if current_price >= target_price:
+                await self.close_all(symbol, current_price, 'take_profit')
+        else:  # SHORT
+            target_price = avg_price * (1 - tp_percent / 100)
+            if current_price <= target_price:
+                await self.close_all(symbol, current_price, 'take_profit')
 
     async def close_all(self, symbol, current_price, reason):
         if not self.position or self.position['symbol'] != symbol:
             return
         total_qty = self.position['total_qty']
+        side = self.position['side']
+        close_side = 'sell' if side == 'LONG' else 'buy'
         try:
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
-                side='sell',
+                side=close_side,
                 amount=total_qty,
-                params={'positionSide': 'LONG'}
+                params={'positionSide': side}
             )
             logger.info(f"🔴 ЗАКРЫТА ВСЯ ПОЗИЦИЯ {symbol} по {reason}, цена {current_price}")
             balance = await self.get_balance()
@@ -237,13 +252,14 @@ class TradingBot:
                 if symbol in self.blacklist:
                     continue
                 try:
-                    if not await self.check_trend(symbol):
+                    trend = await self.check_trend(symbol)
+                    if trend is None:
                         continue
-                    if await self.check_signal(symbol):
-                        ticker = await self.exchange.fetch_ticker(symbol)
-                        price = ticker['last']
-                        await self.open_first_order(symbol, price)
-                        break
+                    # Если тренд определён, открываем первый ордер (без дополнительного сигнала)
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    price = ticker['last']
+                    await self.open_first_order(symbol, price, trend)
+                    break  # одна активная позиция
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
                 await asyncio.sleep(0.5)
@@ -254,7 +270,7 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 БОТ ЗАПУЩЕН (только LONG, мартингейл до 5 шагов)\n"
+            f"🚀 БОТ ЗАПУЩЕН (LONG/SHORT, мартингейл до 5 шагов)\n"
             f"Сумма: {self.config['trade_params']['base_amount']} USDT\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
