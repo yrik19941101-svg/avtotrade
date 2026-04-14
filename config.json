@@ -6,12 +6,13 @@
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
     "trend_tf": "1h",
     "trend_tf2": "4h",
-    "max_positions": 20,
+    "max_positions": 15,
+    "cooldown_hours": 1,
     "trade_params": {
         "base_amount": 30,
-        "martingale_multiplier": 2.5,
+        "martingale_multiplier": 2.0,
         "max_steps": 5,
-        "step_percent": 1.5,
-        "tp_percent": 0.5
+        "step_percent": 1.0,
+        "tp_percent": 1.5
     }
 }
