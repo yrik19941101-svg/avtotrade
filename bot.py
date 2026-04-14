@@ -3,7 +3,7 @@ import logging
 import ccxt.async_support as ccxt
 import pandas as pd
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Bot
 
 CONFIG_FILE = "config.json"
@@ -28,10 +28,12 @@ class TradingBot:
             }
         })
         self.telegram_bot = Bot(token=config["telegram_token"])
-        self.positions = {}   # symbol -> position data
+        self.positions = {}
         self.all_symbols = []
         self.blacklist = set()
+        self.cooldown = {}
         self.last_heartbeat = datetime.now()
+        self.cooldown_hours = self.config.get('cooldown_hours', 1)
 
     async def get_balance(self):
         try:
@@ -103,7 +105,7 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def open_first_order(self, symbol, price, trend):
-        # Инверсия: если тренд LONG -> открываем SHORT, если SHORT -> LONG
+        # Инверсия: тренд LONG -> открываем SHORT, тренд SHORT -> LONG
         side = 'SHORT' if trend == 'LONG' else 'LONG'
         trade_amount = self.config['trade_params']['base_amount']
         order_side = 'buy' if side == 'LONG' else 'sell'
@@ -130,7 +132,9 @@ class TradingBot:
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
                 'step': 1,
                 'avg_price': price,
-                'total_qty': quantity
+                'total_qty': quantity,
+                'open_time': datetime.now(),
+                'unstuck_triggered': False
             }
             balance = await self.get_balance()
             msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
@@ -233,6 +237,10 @@ class TradingBot:
                    f"Цена закрытия: {current_price:.5f}\nБаланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
             del self.positions[symbol]
+            if reason == 'take_profit':
+                self.cooldown[symbol] = datetime.now() + timedelta(hours=self.cooldown_hours)
+                logger.info(f"{symbol}: заблокирована на {self.cooldown_hours} час(ов) после тейк-профита")
+                await self.send_telegram(f"🔒 {symbol}: блокировка на {self.cooldown_hours} час(ов) (тейк-профит)")
         except Exception as e:
             logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
 
@@ -248,17 +256,20 @@ class TradingBot:
     async def scan_symbols(self):
         while True:
             await self.heartbeat()
-            # Мониторим открытые позиции
             for symbol in list(self.positions.keys()):
                 await self.monitor_position(symbol)
-            # Если достигнут лимит позиций, не ищем новые
+
             if len(self.positions) >= self.config['max_positions']:
                 await asyncio.sleep(5)
                 continue
 
             logger.info(f"🔄 Сканирование {len(self.all_symbols)} монет...")
             for symbol in self.all_symbols:
-                if symbol in self.blacklist or symbol in self.positions:
+                if symbol in self.blacklist:
+                    continue
+                if symbol in self.positions:
+                    continue
+                if symbol in self.cooldown and datetime.now() < self.cooldown[symbol]:
                     continue
                 try:
                     trend = await self.check_trend(symbol)
@@ -267,7 +278,6 @@ class TradingBot:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
                     await self.open_first_order(symbol, price, trend)
-                    # Если открыли позицию, переходим к следующему циклу (чтобы не превысить лимит)
                     if len(self.positions) >= self.config['max_positions']:
                         break
                 except Exception as e:
@@ -280,12 +290,13 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, инверсия сигнала)\n"
+            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, инверсия)\n"
             f"Сумма: {self.config['trade_params']['base_amount']} USDT\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
             f"TP: {self.config['trade_params']['tp_percent']}%\n"
+            f"Блокировка монеты после TP: {self.cooldown_hours} час(ов)\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
