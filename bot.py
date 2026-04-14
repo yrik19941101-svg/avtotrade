@@ -35,6 +35,12 @@ class TradingBot:
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
 
+        # Загружаем чёрный список из конфига
+        blacklist_from_config = self.config.get('blacklist_symbols', [])
+        for sym in blacklist_from_config:
+            self.blacklist.add(sym)
+        logger.info(f"Загружено {len(blacklist_from_config)} символов в чёрный список")
+
     async def get_balance(self):
         try:
             balance = await self.exchange.fetch_balance()
@@ -105,7 +111,6 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def open_first_order(self, symbol, price, trend):
-        # Инверсия: тренд LONG -> открываем SHORT, тренд SHORT -> LONG
         side = 'SHORT' if trend == 'LONG' else 'LONG'
         trade_amount = self.config['trade_params']['base_amount']
         order_side = 'buy' if side == 'LONG' else 'sell'
@@ -184,7 +189,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount} USDT")
+            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, suma {new_amount} USDT")
             pos['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
             pos['step'] = new_step
             total_qty = sum(o['quantity'] for o in pos['orders'])
@@ -297,6 +302,7 @@ class TradingBot:
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
             f"TP: {self.config['trade_params']['tp_percent']}%\n"
             f"Блокировка монеты после TP: {self.cooldown_hours} час(ов)\n"
+            f"Чёрный список: {len(self.blacklist)} монет\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
