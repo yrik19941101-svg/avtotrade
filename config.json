@@ -4,7 +4,7 @@
     "exchange": "bingx",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "timeframe": "2h",
+    "timeframe": "15m",
     "max_positions": 40,
     "cooldown_hours": 1,
     "blacklist_symbols": [
@@ -13,10 +13,10 @@
         "THETA/USDT", "LINK/USDT", "ETH/USDT", "AAVE/USDT"
     ],
     "trade_params": {
-        "base_amount": 10,
+        "base_amount": 5,
         "martingale_multiplier": 5.0,
         "max_steps": 3,
         "step_percent": 1.0,
-        "tp_percent": 0.5
+        "tp_percent": 0.3
     }
 }
