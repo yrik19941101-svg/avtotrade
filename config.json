@@ -1,33 +1,21 @@
 {
-    "telegram_token": "8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
+    "telegram_token": "ВАШ_ТОКЕН_TELEGRAM8739262405:AAEXRb-j5OsY8MRugaI-2I0KRreYpJrXPrA",
     "telegram_chat_id": "354290076",
     "exchange": "bingx",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "trend_tf": "1h",
-    "trend_tf2": "4h",
-    "max_positions": 20,
+    "timeframe": "2h",
+    "max_positions": 40,
     "cooldown_hours": 1,
     "blacklist_symbols": [
-        "DOGE/USDT",
-        "NEAR/USDT",
-        "ICP/USDT",
-        "SAND/USDT",
-        "SUSHI/USDT",
-        "SOL/USDT",
-        "XRP/USDT",
-        "BTC/USDT",
-        "FIL/USDT",
-        "AVAX/USDT",
-        "THETA/USDT",
-        "LINK/USDT",
-        "ETH/USDT",
-        "AAVE/USDT"
+        "DOGE/USDT", "NEAR/USDT", "ICP/USDT", "SAND/USDT", "SUSHI/USDT",
+        "SOL/USDT", "XRP/USDT", "BTC/USDT", "FIL/USDT", "AVAX/USDT",
+        "THETA/USDT", "LINK/USDT", "ETH/USDT", "AAVE/USDT"
     ],
     "trade_params": {
-        "base_amount": 60,
-        "martingale_multiplier": 3.0,
-        "max_steps": 5,
+        "base_amount": 10,
+        "martingale_multiplier": 5.0,
+        "max_steps": 3,
         "step_percent": 1.0,
         "tp_percent": 0.5
     }
