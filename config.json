@@ -25,7 +25,7 @@
         "AAVE/USDT"
     ],
     "trade_params": {
-        "base_amount": 30,
+        "base_amount": 60,
         "martingale_multiplier": 3.0,
         "max_steps": 5,
         "step_percent": 1.0,
