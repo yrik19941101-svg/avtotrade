@@ -73,16 +73,21 @@ class TradingBot:
                             symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
         logger.info(f"Загружено {len(self.all_symbols)} фьючерсных пар")
 
-    async def get_ema(self, symbol, timeframe, period, limit=150):
-        df = await self.get_market_data(symbol, timeframe, limit)
-        if df is None or len(df) < period:
-            return None, None
-        ema = df['close'].ewm(span=period, adjust=False).mean()
-        return ema.iloc[-1], df['close'].iloc[-1]
+    def calculate_heiken_ashi(self, df):
+        df = df.copy()
+        df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+        ha_open = [df['open'].iloc[0]]
+        for i in range(1, len(df)):
+            ha_open.append((ha_open[i-1] + df['ha_close'].iloc[i-1]) / 2)
+        df['ha_open'] = ha_open
+        df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
+        df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
+        df['ha_color'] = df.apply(lambda row: 'green' if row['ha_close'] >= row['ha_open'] else 'red', axis=1)
+        return df
 
-    async def get_market_data(self, symbol, timeframe, limit=150):
+    async def get_market_data(self, symbol, limit=20):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, self.config['timeframe'], limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -90,28 +95,35 @@ class TradingBot:
             if 'pause currently' in str(e) or 'not found' in str(e):
                 self.blacklist.add(symbol)
             else:
-                logger.error(f"Ошибка данных {symbol} {timeframe}: {e}")
+                logger.error(f"Ошибка данных {symbol}: {e}")
             return None
 
-    async def check_trend(self, symbol):
-        ema50_1h, close_1h = await self.get_ema(symbol, self.config['trend_tf'], 50)
-        ema50_4h, close_4h = await self.get_ema(symbol, self.config['trend_tf2'], 50)
-        if ema50_1h is None or ema50_4h is None:
+    async def check_signal(self, symbol):
+        """Возвращает 'LONG' или 'SHORT' по Heiken Ashi, если сигнал активен"""
+        df = await self.get_market_data(symbol, limit=10)
+        if df is None or len(df) < 4:
             return None
-        long_condition = (close_1h > ema50_1h) and (close_4h > ema50_4h)
-        short_condition = (close_1h < ema50_1h) and (close_4h < ema50_4h)
-        if long_condition:
-            return 'LONG'
-        if short_condition:
-            return 'SHORT'
+        ha_df = self.calculate_heiken_ashi(df)
+        prev_color = ha_df['ha_color'].iloc[-3]
+        signal_color = ha_df['ha_color'].iloc[-2]
+        current_candle = ha_df.iloc[-1]
+        current_ha_open = current_candle['ha_open']
+
+        # LONG: предыдущая красная, сигнальная зелёная, откат вниз
+        if prev_color == 'red' and signal_color == 'green':
+            if current_candle['low'] < current_ha_open:
+                return 'LONG'
+        # SHORT: предыдущая зелёная, сигнальная красная, откат вверх
+        elif prev_color == 'green' and signal_color == 'red':
+            if current_candle['high'] > current_ha_open:
+                return 'SHORT'
         return None
 
     async def get_min_amount(self, symbol):
         market = self.exchange.market(symbol)
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
-    async def open_first_order(self, symbol, price, trend):
-        side = 'SHORT' if trend == 'LONG' else 'LONG'
+    async def open_first_order(self, symbol, price, side):
         trade_amount = self.config['trade_params']['base_amount']
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
@@ -138,8 +150,7 @@ class TradingBot:
                 'step': 1,
                 'avg_price': price,
                 'total_qty': quantity,
-                'open_time': datetime.now(),
-                'unstuck_triggered': False
+                'open_time': datetime.now()
             }
             balance = await self.get_balance()
             msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
@@ -189,7 +200,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, suma {new_amount} USDT")
+            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount} USDT")
             pos['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
             pos['step'] = new_step
             total_qty = sum(o['quantity'] for o in pos['orders'])
@@ -277,12 +288,12 @@ class TradingBot:
                 if symbol in self.cooldown and datetime.now() < self.cooldown[symbol]:
                     continue
                 try:
-                    trend = await self.check_trend(symbol)
-                    if trend is None:
+                    signal = await self.check_signal(symbol)
+                    if signal is None:
                         continue
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
-                    await self.open_first_order(symbol, price, trend)
+                    await self.open_first_order(symbol, price, signal)
                     if len(self.positions) >= self.config['max_positions']:
                         break
                 except Exception as e:
@@ -295,7 +306,7 @@ class TradingBot:
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
-            f"🚀 БОТ ЗАПУЩЕН (EMA50 1H+4H, инверсия)\n"
+            f"🚀 БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
             f"Сумма: {self.config['trade_params']['base_amount']} USDT\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
