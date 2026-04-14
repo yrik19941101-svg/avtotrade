@@ -35,7 +35,6 @@ class TradingBot:
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
 
-        # Загружаем чёрный список из конфига
         blacklist_from_config = self.config.get('blacklist_symbols', [])
         for sym in blacklist_from_config:
             self.blacklist.add(sym)
@@ -99,7 +98,6 @@ class TradingBot:
             return None
 
     async def check_signal(self, symbol):
-        """Возвращает 'LONG' или 'SHORT' по Heiken Ashi, если сигнал активен"""
         df = await self.get_market_data(symbol, limit=10)
         if df is None or len(df) < 4:
             return None
@@ -109,11 +107,9 @@ class TradingBot:
         current_candle = ha_df.iloc[-1]
         current_ha_open = current_candle['ha_open']
 
-        # LONG: предыдущая красная, сигнальная зелёная, откат вниз
         if prev_color == 'red' and signal_color == 'green':
             if current_candle['low'] < current_ha_open:
                 return 'LONG'
-        # SHORT: предыдущая зелёная, сигнальная красная, откат вверх
         elif prev_color == 'green' and signal_color == 'red':
             if current_candle['high'] > current_ha_open:
                 return 'SHORT'
@@ -122,6 +118,15 @@ class TradingBot:
     async def get_min_amount(self, symbol):
         market = self.exchange.market(symbol)
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
+
+    def calculate_stop_price(self, pos):
+        stop_loss_usd = self.config.get('stop_loss_usd', 0)
+        if stop_loss_usd <= 0 or pos['total_qty'] == 0:
+            return None
+        if pos['side'] == 'LONG':
+            return pos['avg_price'] - (stop_loss_usd / pos['total_qty'])
+        else:
+            return pos['avg_price'] + (stop_loss_usd / pos['total_qty'])
 
     async def open_first_order(self, symbol, price, side):
         trade_amount = self.config['trade_params']['base_amount']
@@ -144,7 +149,7 @@ class TradingBot:
                 params={'positionSide': side}
             )
             logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount} USDT")
-            self.positions[symbol] = {
+            pos = {
                 'side': side,
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
                 'step': 1,
@@ -152,6 +157,11 @@ class TradingBot:
                 'total_qty': quantity,
                 'open_time': datetime.now()
             }
+            stop_price = self.calculate_stop_price(pos)
+            if stop_price:
+                pos['stop_price'] = stop_price
+                logger.info(f"{symbol}: стоп-лосс установлен на {stop_price:.5f}")
+            self.positions[symbol] = pos
             balance = await self.get_balance()
             msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
@@ -207,10 +217,15 @@ class TradingBot:
             avg_price = sum(o['price'] * o['quantity'] for o in pos['orders']) / total_qty
             pos['avg_price'] = avg_price
             pos['total_qty'] = total_qty
+            stop_price = self.calculate_stop_price(pos)
+            if stop_price:
+                pos['stop_price'] = stop_price
+                logger.info(f"{symbol}: стоп-лосс обновлён до {stop_price:.5f}")
             balance = await self.get_balance()
             msg = (f"🟡 УСРЕДНЕНИЕ (шаг {new_step})\n"
                    f"Монета: {symbol}\nЦена: {current_price:.5f}\nСумма: {new_amount:.2f} USDT\n"
-                   f"Средняя цена: {avg_price:.5f}\nБаланс: {balance:.2f} USDT")
+                   f"Средняя цена: {avg_price:.5f}\n"
+                   f"Стоп-лосс: {stop_price:.5f}\nБаланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
         except Exception as e:
             logger.error(f"Ошибка добавления ордера {symbol}: {e}")
@@ -230,6 +245,18 @@ class TradingBot:
             target_price = avg_price * (1 - tp_percent / 100)
             if current_price <= target_price:
                 await self.close_all(symbol, current_price, 'take_profit')
+
+    async def check_stop_loss(self, symbol, current_price):
+        if symbol not in self.positions:
+            return
+        pos = self.positions[symbol]
+        if 'stop_price' not in pos:
+            return
+        side = pos['side']
+        if side == 'LONG' and current_price <= pos['stop_price']:
+            await self.close_all(symbol, current_price, 'stop_loss')
+        elif side == 'SHORT' and current_price >= pos['stop_price']:
+            await self.close_all(symbol, current_price, 'stop_loss')
 
     async def close_all(self, symbol, current_price, reason):
         if symbol not in self.positions:
@@ -266,6 +293,7 @@ class TradingBot:
             current_price = ticker['last']
             await self.add_martingale_order(symbol, current_price)
             await self.check_take_profit(symbol, current_price)
+            await self.check_stop_loss(symbol, current_price)
         except Exception as e:
             logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
 
@@ -312,6 +340,7 @@ class TradingBot:
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
             f"TP: {self.config['trade_params']['tp_percent']}%\n"
+            f"Стоп-лосс: {self.config.get('stop_loss_usd', 0)} USDT на позицию\n"
             f"Блокировка монеты после TP: {self.cooldown_hours} час(ов)\n"
             f"Чёрный список: {len(self.blacklist)} монет\n"
             f"Баланс: {balance:.2f} USDT"
