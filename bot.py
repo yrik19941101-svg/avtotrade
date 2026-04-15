@@ -34,7 +34,6 @@ class TradingBot:
         self.cooldown = {}
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
-        self.risk_per_trade = self.config.get('risk_per_trade_percent', 3.5)
         self.min_volume = self.config.get('min_volume_24h', 0)
         self.max_volatility = self.config.get('volatility_filter_percent', 20)
         self.dynamic_tp = self.config.get('dynamic_tp_enabled', False)
@@ -156,10 +155,11 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def get_position_size(self, symbol, price):
+        # Фиксированная базовая сумма 30 USDT
+        trade_amount = 30.0
+        # Ограничиваем, чтобы не превышало 90% баланса
         balance = await self.get_balance()
-        trade_amount = balance * self.risk_per_trade / 100
-        trade_amount = max(trade_amount, 30.0)
-        trade_amount = min(trade_amount, balance * 0.3)
+        trade_amount = min(trade_amount, balance * 0.9)
         return trade_amount
 
     async def open_first_order(self, symbol, price, side):
@@ -357,7 +357,7 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Риск на сделку: {self.risk_per_trade}% от баланса\n"
+            f"Фиксированная сумма сделки: 30 USDT (базовая, мартингейл увеличивает)\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
