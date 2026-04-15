@@ -131,7 +131,7 @@ class TradingBot:
 
     async def check_signal(self, symbol):
         timeframe = self.config['timeframe']
-        df = await self.get_market_data(symbol, limit=30)   # убрали лишний timeframe
+        df = await self.get_market_data(symbol, limit=30)
         if df is None or len(df) < 6:
             return None
         if not self.is_mid_candle(df, timeframe):
@@ -149,17 +149,17 @@ class TradingBot:
         pull_low = pull['low']
         pull_high = pull['high']
 
+        min_pullback = self.config.get('signal_params', {}).get('min_pullback_percent', 0.3) / 100.0
+
         if sig_color == 'green':
             red_cnt = self.count_consecutive_ha(ha_df, 'red')
             if red_cnt >= 3:
-                level_down = sig_ha_close * 0.7
-                if pull_low <= sig_ha_close and pull_low >= level_down:
+                if pull_low <= sig_ha_close * (1 - min_pullback):
                     return 'LONG'
         elif sig_color == 'red':
             green_cnt = self.count_consecutive_ha(ha_df, 'green')
             if green_cnt >= 3:
-                level_up = sig_ha_close * 1.3
-                if pull_high >= sig_ha_close and pull_high <= level_up:
+                if pull_high >= sig_ha_close * (1 + min_pullback):
                     return 'SHORT'
         return None
 
@@ -193,11 +193,8 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def get_position_size(self, symbol, price):
-        # Фиксированная базовая сумма 100 USDT
-        trade_amount = 100.0
-        balance = await self.get_balance()
-        trade_amount = min(trade_amount, balance * 0.9)
-        return trade_amount
+        # Фиксированная сумма 100 USDT (без ограничений по балансу)
+        return 100.0
 
     async def open_first_order(self, symbol, price, side):
         trade_amount = await self.get_position_size(symbol, price)
@@ -219,7 +216,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, suma {trade_amount:.2f} USDT")
+            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT")
             pos = {
                 'side': side,
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
@@ -394,7 +391,7 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Фиксированная сумма сделки: 100 USDT (базовая, мартингейл увеличивает)\n"
+            f"Фиксированная сумма сделки: 100 USDT (без ограничений по балансу)\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
