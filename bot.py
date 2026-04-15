@@ -34,7 +34,7 @@ class TradingBot:
         self.cooldown = {}
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
-        self.risk_per_trade = self.config.get('risk_per_trade_percent', 1.5)
+        self.risk_per_trade = self.config.get('risk_per_trade_percent', 3.5)
         self.min_volume = self.config.get('min_volume_24h', 0)
         self.max_volatility = self.config.get('volatility_filter_percent', 20)
         self.dynamic_tp = self.config.get('dynamic_tp_enabled', False)
