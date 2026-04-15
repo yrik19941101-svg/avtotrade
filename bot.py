@@ -159,7 +159,8 @@ class SignalBot:
     def is_mid_candle(self, df, timeframe, snooze_percent=0.3):
         if len(df) < 1:
             return False
-        now = pd.Timestamp.utcnow()
+        # Исправлено: устаревший utcnow() заменён на now('UTC')
+        now = pd.Timestamp.now('UTC')
         last_ts = df['timestamp'].iloc[-1]
         freq_hours = self.period_hours(timeframe)
         elapsed = (now - last_ts).total_seconds() / 3600
@@ -185,7 +186,7 @@ class SignalBot:
         sig = ha_df.iloc[-2]
         sig_color = sig['ha_color']
         sig_ha_close = sig['ha_close']
-        sig_range = sig['high'] - sig['low']
+        sig_range = sig['high'] - sig['low']  # не используется, но оставлено
 
         # Откатная свеча (последняя, ещё не закрыта)
         pull = ha_df.iloc[-1]
