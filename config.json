@@ -4,13 +4,19 @@
     "exchange": "bingx",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "timeframes": ["6h"],
+    "timeframe": "6h",
+    "max_positions": 2,
+    "cooldown_hours": 3,
     "min_volume_24h": 50000,
     "volatility_filter_percent": 5,
     "blacklist_symbols": [],
-    "telegram_retry_count": 3,
-    "telegram_retry_delay": 5,
-    "signal_params": {
-        "min_pullback_percent": 0.3
+    "dynamic_tp_enabled": true,
+    "dynamic_tp_step": 1.0,
+    "trade_params": {
+        "base_amount": 0,
+        "martingale_multiplier": 1.6,
+        "max_steps": 3,
+        "step_percent": 3.0,
+        "tp_percent": 2.0
     }
 }
