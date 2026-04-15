@@ -7,7 +7,7 @@
     "timeframe": "4h",
     "max_positions": 10,
     "cooldown_hours": 3,
-    "risk_per_trade_percent": 4.5,
+    "risk_per_trade_percent": 1.5,
     "min_volume_24h": 50000,
     "volatility_filter_percent": 5,
     "blacklist_symbols": [
@@ -16,7 +16,7 @@
         "THETA/USDT", "LINK/USDT", "ETH/USDT", "AAVE/USDT"
     ],
     "trade_params": {
-        "base_amount": 0,
+        "base_amount": 100,
         "martingale_multiplier": 1.6,
         "max_steps": 3,
         "step_percent": 3.0,
