@@ -109,8 +109,10 @@ class TradingBot:
     def is_mid_candle(self, df, timeframe, snooze_percent=0.3):
         if len(df) < 1:
             return False
-        now = pd.Timestamp.now('UTC')
+        now = pd.Timestamp.now('UTC').tz_localize(None)
         last_ts = df['timestamp'].iloc[-1]
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.tz_localize(None)
         freq_hours = self.period_hours(timeframe)
         elapsed = (now - last_ts).total_seconds() / 3600
         remaining = freq_hours - elapsed
@@ -120,7 +122,7 @@ class TradingBot:
     def count_consecutive_ha(self, ha_df, color):
         arr = ha_df['ha_color'].values
         cnt = 0
-        for i in range(len(arr)-2, -1, -1):  # с предпоследней, исключая последнюю (она сигнальная)
+        for i in range(len(arr)-3, -1, -1):
             if arr[i] == color:
                 cnt += 1
             else:
@@ -129,8 +131,8 @@ class TradingBot:
 
     async def check_signal(self, symbol):
         timeframe = self.config['timeframe']
-        df = await self.get_market_data(symbol, timeframe, limit=20)
-        if df is None or len(df) < 5:
+        df = await self.get_market_data(symbol, timeframe, limit=30)
+        if df is None or len(df) < 6:
             return None
         if not self.is_mid_candle(df, timeframe):
             return None
@@ -139,27 +141,24 @@ class TradingBot:
         if len(ha_df) < 4:
             return None
 
-        # Сигнальная свеча – предпоследняя (индекс -2)
         sig = ha_df.iloc[-2]
         sig_color = sig['ha_color']
         sig_ha_close = sig['ha_close']
 
-        # Текущая свеча (индекс -1) для отката
         pull = ha_df.iloc[-1]
         pull_low = pull['low']
         pull_high = pull['high']
 
-        # Количество последовательных свечей перед сигнальной (исключая её)
         if sig_color == 'green':
             red_cnt = self.count_consecutive_ha(ha_df, 'red')
             if red_cnt >= 3:
-                level_down = sig_ha_close * 0.7  # 30% вниз
+                level_down = sig_ha_close * 0.7
                 if pull_low <= sig_ha_close and pull_low >= level_down:
                     return 'LONG'
         elif sig_color == 'red':
             green_cnt = self.count_consecutive_ha(ha_df, 'green')
             if green_cnt >= 3:
-                level_up = sig_ha_close * 1.3  # 30% вверх
+                level_up = sig_ha_close * 1.3
                 if pull_high >= sig_ha_close and pull_high <= level_up:
                     return 'SHORT'
         return None
@@ -176,9 +175,9 @@ class TradingBot:
         df['ha_color'] = df.apply(lambda row: 'green' if row['ha_close'] >= row['ha_open'] else 'red', axis=1)
         return df
 
-    async def get_market_data(self, symbol, timeframe, limit=20):
+    async def get_market_data(self, symbol, limit=30):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, self.config['timeframe'], limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -194,8 +193,8 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     async def get_position_size(self, symbol, price):
-        # Фиксированная базовая сумма 30 USDT
-        trade_amount = 30.0
+        # Фиксированная базовая сумма 100 USDT
+        trade_amount = 100.0
         balance = await self.get_balance()
         trade_amount = min(trade_amount, balance * 0.9)
         return trade_amount
@@ -381,10 +380,6 @@ class TradingBot:
                         continue
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
-                    # Вход по цене закрытия сигнальной свечи? Но у нас нет готовой цены, возьмём текущую.
-                    # Для точности нужно запомнить цену сигнальной свечи. Упростим: используем текущую.
-                    # В сигнальном боте цена входа = sig_ha_close. Мы её не сохранили. Переделаем check_signal, чтобы возвращал цену.
-                    # Пока оставим текущую цену.
                     await self.open_first_order(symbol, price, signal)
                     if len(self.positions) >= self.config['max_positions']:
                         break
@@ -399,7 +394,7 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Фиксированная сумма сделки: 30 USDT (базовая, мартингейл увеличивает)\n"
+            f"Фиксированная сумма сделки: 100 USDT (базовая, мартингейл увеличивает)\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
