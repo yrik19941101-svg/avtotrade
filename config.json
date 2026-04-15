@@ -5,9 +5,9 @@
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
     "timeframe": "4h",
-    "max_positions": 40,
+    "max_positions": 10,
     "cooldown_hours": 3,
-    "risk_per_trade_percent": 1.5,
+    "risk_per_trade_percent": 4.5,
     "min_volume_24h": 50000,
     "volatility_filter_percent": 5,
     "blacklist_symbols": [
