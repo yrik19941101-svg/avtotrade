@@ -36,7 +36,7 @@ class TradingBot:
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
         self.risk_per_trade = self.config.get('risk_per_trade_percent', 1.5)
         self.min_volume = self.config.get('min_volume_24h', 0)
-        self.max_volatility = self.config.get('volatility_filter_percent', 100)
+        self.max_volatility = self.config.get('volatility_filter_percent', 20)
         self.dynamic_tp = self.config.get('dynamic_tp_enabled', False)
         self.dynamic_tp_step = self.config.get('dynamic_tp_step', 1.0)
 
@@ -158,7 +158,7 @@ class TradingBot:
     async def get_position_size(self, symbol, price):
         balance = await self.get_balance()
         trade_amount = balance * self.risk_per_trade / 100
-        trade_amount = max(trade_amount, 10.0)
+        trade_amount = max(trade_amount, 30.0)
         trade_amount = min(trade_amount, balance * 0.3)
         return trade_amount
 
