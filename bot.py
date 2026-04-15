@@ -34,8 +34,12 @@ class TradingBot:
         self.cooldown = {}
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 1)
+        self.risk_per_trade = self.config.get('risk_per_trade_percent', 1.5)
+        self.min_volume = self.config.get('min_volume_24h', 0)
+        self.max_volatility = self.config.get('volatility_filter_percent', 100)
+        self.dynamic_tp = self.config.get('dynamic_tp_enabled', False)
+        self.dynamic_tp_step = self.config.get('dynamic_tp_step', 1.0)
 
-        # Загрузка чёрного списка из конфига
         blacklist_from_config = self.config.get('blacklist_symbols', [])
         for sym in blacklist_from_config:
             self.blacklist.add(sym)
@@ -66,83 +70,43 @@ class TradingBot:
             await self.send_telegram(msg)
             self.last_heartbeat = now
 
+    async def is_suitable_symbol(self, symbol):
+        try:
+            ticker = await self.exchange.fetch_ticker(symbol)
+            volume_24h = ticker.get('quoteVolume', 0)
+            if volume_24h < self.min_volume:
+                logger.debug(f"{symbol}: объём {volume_24h} < {self.min_volume}, пропускаем")
+                return False
+            high = ticker['high']
+            low = ticker['low']
+            if low > 0:
+                volatility = (high - low) / low * 100
+                if volatility > self.max_volatility:
+                    logger.debug(f"{symbol}: волатильность {volatility:.2f}% > {self.max_volatility}%, пропускаем")
+                    return False
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            if 'pause currently' in error_msg or 'not found' in error_msg or '109415' in error_msg:
+                logger.warning(f"{symbol}: приостановлен или не найден, добавляем в чёрный список")
+                self.blacklist.add(symbol)
+            else:
+                logger.error(f"Ошибка в is_suitable_symbol для {symbol}: {e}")
+            return False
+
     async def load_markets(self):
         await self.exchange.load_markets()
-        # Предварительный список всех USDT-фьючерсов
         candidates = [symbol for symbol, market in self.exchange.markets.items()
                       if market['swap'] and market['quote'] == 'USDT' and
                       symbol.count('/') == 1 and not symbol.startswith(('NCFX', 'NCCO', 'NCSI', 'NCSK'))]
         logger.info(f"Найдено {len(candidates)} кандидатов. Применяем фильтры...")
         self.all_symbols = []
         for symbol in candidates:
-            try:
-                # Проверяем объём и волатильность
-                if await self.is_suitable_symbol(symbol):
-                    self.all_symbols.append(symbol)
-            except Exception as e:
-                logger.error(f"Ошибка проверки {symbol}: {e}")
+            if symbol in self.blacklist:
+                continue
+            if await self.is_suitable_symbol(symbol):
+                self.all_symbols.append(symbol)
         logger.info(f"После фильтрации осталось {len(self.all_symbols)} пар")
-
-    async def is_suitable_symbol(self, symbol):
-        """Проверяет монету по объёму и волатильности"""
-        try:
-            # Получаем 24-часовой тикер
-            ticker = await self.exchange.fetch_ticker(symbol)
-            volume_24h = ticker.get('quoteVolume', 0)
-            if volume_24h < self.config.get('min_volume_24h', 0):
-                return False
-
-            # Волатильность за 24 часа (процент)
-            high = ticker['high']
-            low = ticker['low']
-            if low and low > 0:
-                volatility = (high - low) / low * 100
-                max_volatility = self.config.get('volatility_filter_percent', 100)
-                if volatility > max_volatility:
-                    return False
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка в is_suitable_symbol для {symbol}: {e}")
-            return False
-
-    async def get_position_size(self, symbol, current_price):
-        """Рассчитывает размер первого ордера (в монетах) на основе риска и стоп-лосса"""
-        balance = await self.get_balance()
-        risk_amount = balance * (self.config['risk_per_trade_percent'] / 100)   # сколько USDT готовы потерять
-        stop_loss_usd = self.config.get('stop_loss_usd', 3)
-        if stop_loss_usd <= 0:
-            return 0
-        # При стоп-лоссе в stop_loss_usd долларов, мы хотим потерять risk_amount.
-        # Потеря в USDT = количество_монет * расстояние_цены_стопа.
-        # Расстояние_цены_стопа = stop_loss_usd / quantity? Нет, мы не знаем quantity.
-        # Нам нужно найти quantity, при котором при движении цены на X% убыток = stop_loss_usd.
-        # Но стоп-лосс у нас фиксированный в USDT, а не в процентах. Значит, мы рассчитываем quantity так:
-        #   риск (в USDT) = quantity * (stop_loss_usd / quantity?) Запутано.
-        # Правильный подход: стоп-лосс в USDT означает, что при достижении стоп-цены, убыток будет равен stop_loss_usd.
-        # Убыток = quantity * |stop_price - entry_price|.
-        # Но stop_price зависит от entry_price и расстояния, которое мы не знаем.
-        # В нашей стратегии стоп-лосс задан в USDT, а не в процентах. Поэтому проще всего: зафиксировать сумму сделки (например, 10 USDT) и при стоп-лоссе 3 USDT риск будет 3/10 = 30% от суммы, что не равно risk_per_trade_percent.
-        # Чтобы риск составлял risk_per_trade_percent от баланса, нужно, чтобы stop_loss_usd = balance * risk_per_trade_percent / 100.
-        # Тогда сумма сделки может быть любой, но стоп-лосс в USDT должен быть именно таким.
-        # Я предлагаю пересчитывать сумму сделки так, чтобы при стоп-лоссе 3 USDT, риск был 1.5% от баланса. Это означает, что balance * 0.015 = 3, откуда balance = 200. То есть для баланса 200 USDT риск будет 1.5%, для другого баланса риск изменится.
-        # Но вы хотите, чтобы риск всегда был 1.5% от текущего баланса. Следовательно, stop_loss_usd должен быть динамическим: stop_loss_usd = balance * risk_per_trade_percent / 100.
-        # Однако у вас stop_loss_usd фиксирован (3). Поэтому я оставлю фиксированную сумму сделки, а риск будет плавать.
-        # Для простоты будем использовать фиксированную сумму 10 USDT, как ранее, или можно вычислить trade_amount = balance * risk_per_trade_percent / 100, но тогда стоп-лосс 3 USDT даст риск 3 / trade_amount, что не равно risk_per_trade_percent.
-        # Лучше сделаем trade_amount фиксированной, а risk_per_trade_percent будем использовать только для информации.
-        # Однако в конфиге base_amount = 0, значит, нужно вычислить trade_amount.
-        # Я вычислю trade_amount = balance * risk_per_trade_percent / 100, но тогда стоп-лосс 3 USDT будет составлять (3 / trade_amount)*100% от суммы сделки.
-        trade_amount = balance * self.config['risk_per_trade_percent'] / 100
-        if trade_amount < 10:
-            trade_amount = 10
-        quantity = trade_amount / current_price
-        min_amount = await self.get_min_amount(symbol)
-        if quantity < min_amount:
-            return 0
-        return round(quantity, 5)
-
-    async def get_min_amount(self, symbol):
-        market = self.exchange.market(symbol)
-        return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     def calculate_heiken_ashi(self, df):
         df = df.copy()
@@ -187,24 +151,30 @@ class TradingBot:
                 return 'SHORT'
         return None
 
-    def calculate_stop_price(self, pos):
-        """Возвращает цену, при которой убыток достигнет stop_loss_usd"""
-        stop_loss_usd = self.config.get('stop_loss_usd', 0)
-        if stop_loss_usd <= 0 or pos['total_qty'] == 0:
-            return None
-        if pos['side'] == 'LONG':
-            return pos['avg_price'] - (stop_loss_usd / pos['total_qty'])
-        else:
-            return pos['avg_price'] + (stop_loss_usd / pos['total_qty'])
+    async def get_min_amount(self, symbol):
+        market = self.exchange.market(symbol)
+        return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
+
+    async def get_position_size(self, symbol, price):
+        balance = await self.get_balance()
+        trade_amount = balance * self.risk_per_trade / 100
+        trade_amount = max(trade_amount, 10.0)
+        trade_amount = min(trade_amount, balance * 0.3)
+        return trade_amount
 
     async def open_first_order(self, symbol, price, side):
-        quantity = await self.get_position_size(symbol, price)
-        if quantity <= 0:
-            logger.warning(f"{symbol}: не удалось рассчитать размер позиции, пропускаем")
-            self.blacklist.add(symbol)
-            return False
+        trade_amount = await self.get_position_size(symbol, price)
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
+            quantity = trade_amount / price
+            min_amount = await self.get_min_amount(symbol)
+            if quantity < min_amount:
+                logger.warning(f"{symbol}: количество {quantity} < {min_amount}, пропускаем")
+                self.blacklist.add(symbol)
+                return False
+            quantity = round(quantity, 5)
+            if quantity <= 0:
+                return False
             order = await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
@@ -212,7 +182,6 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            trade_amount = quantity * price
             logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT")
             pos = {
                 'side': side,
@@ -223,14 +192,10 @@ class TradingBot:
                 'open_time': datetime.now()
             }
             tp_percent = self.config['trade_params']['tp_percent']
-            if self.config['trade_params'].get('dynamic_tp_enabled', False):
+            if self.dynamic_tp:
                 pos['tp_percent'] = tp_percent
             else:
                 pos['tp_percent'] = tp_percent
-            stop_price = self.calculate_stop_price(pos)
-            if stop_price:
-                pos['stop_price'] = stop_price
-                logger.info(f"{symbol}: стоп-лосс установлен на {stop_price:.5f}")
             self.positions[symbol] = pos
             balance = await self.get_balance()
             msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
@@ -287,21 +252,13 @@ class TradingBot:
             avg_price = sum(o['price'] * o['quantity'] for o in pos['orders']) / total_qty
             pos['avg_price'] = avg_price
             pos['total_qty'] = total_qty
-            # Обновляем стоп-лосс
-            stop_price = self.calculate_stop_price(pos)
-            if stop_price:
-                pos['stop_price'] = stop_price
-                logger.info(f"{symbol}: стоп-лосс обновлён до {stop_price:.5f}")
-            # Обновляем TP для динамического режима
-            if self.config['trade_params'].get('dynamic_tp_enabled', False):
-                dynamic_step = self.config['trade_params'].get('dynamic_tp_step', 1.0)
-                pos['tp_percent'] = self.config['trade_params']['tp_percent'] + (new_step - 1) * dynamic_step
+            if self.dynamic_tp:
+                pos['tp_percent'] = self.config['trade_params']['tp_percent'] + (new_step - 1) * self.dynamic_tp_step
                 logger.info(f"{symbol}: TP увеличен до {pos['tp_percent']:.1f}%")
             balance = await self.get_balance()
             msg = (f"🟡 УСРЕДНЕНИЕ (шаг {new_step})\n"
                    f"Монета: {symbol}\nЦена: {current_price:.5f}\nСумма: {new_amount:.2f} USDT\n"
                    f"Средняя цена: {avg_price:.5f}\n"
-                   f"Стоп-лосс: {stop_price:.5f}\n"
                    f"Тейк-профит: {pos['tp_percent']:.1f}%\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
@@ -323,18 +280,6 @@ class TradingBot:
             target_price = avg_price * (1 - tp_percent / 100)
             if current_price <= target_price:
                 await self.close_all(symbol, current_price, 'take_profit')
-
-    async def check_stop_loss(self, symbol, current_price):
-        if symbol not in self.positions:
-            return
-        pos = self.positions[symbol]
-        if 'stop_price' not in pos:
-            return
-        side = pos['side']
-        if side == 'LONG' and current_price <= pos['stop_price']:
-            await self.close_all(symbol, current_price, 'stop_loss')
-        elif side == 'SHORT' and current_price >= pos['stop_price']:
-            await self.close_all(symbol, current_price, 'stop_loss')
 
     async def close_all(self, symbol, current_price, reason):
         if symbol not in self.positions:
@@ -371,7 +316,6 @@ class TradingBot:
             current_price = ticker['last']
             await self.add_martingale_order(symbol, current_price)
             await self.check_take_profit(symbol, current_price)
-            await self.check_stop_loss(symbol, current_price)
         except Exception as e:
             logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
 
@@ -413,14 +357,13 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Риск на сделку: {self.config['risk_per_trade_percent']}% от баланса\n"
+            f"Риск на сделку: {self.risk_per_trade}% от баланса\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
-            f"TP: {self.config['trade_params']['tp_percent']}% (динамический: {self.config['trade_params'].get('dynamic_tp_enabled', False)})\n"
-            f"Стоп-лосс: {self.config.get('stop_loss_usd', 0)} USDT на позицию\n"
+            f"TP: {self.config['trade_params']['tp_percent']}% (динамический: {self.dynamic_tp})\n"
             f"Блокировка монеты после TP: {self.cooldown_hours} час(ов)\n"
-            f"Фильтры: объём > {self.config.get('min_volume_24h', 0)} USDT, волатильность < {self.config.get('volatility_filter_percent', 100)}%\n"
+            f"Фильтры: объём > {self.min_volume}, волатильность < {self.max_volatility}%\n"
             f"Чёрный список: {len(self.blacklist)} монет\n"
             f"Баланс: {balance:.2f} USDT"
         )
