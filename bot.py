@@ -32,6 +32,7 @@ class TradingBot:
         self.all_symbols = []
         self.blacklist = set()
         self.cooldown = {}
+        self.signal_block = {}          # временная блокировка после отправки сигнала
         self.last_heartbeat = datetime.now()
         self.cooldown_hours = self.config.get('cooldown_hours', 3)
         self.min_volume = self.config.get('min_volume_24h', 50000)
@@ -141,26 +142,33 @@ class TradingBot:
         if len(ha_df) < 4:
             return None
 
-        sig = ha_df.iloc[-2]
+        sig = ha_df.iloc[-2]      # сигнальная свеча (закрыта)
+        pull = ha_df.iloc[-1]     # текущая свеча (незакрытая, откат)
+
         sig_color = sig['ha_color']
         sig_ha_close = sig['ha_close']
 
-        pull = ha_df.iloc[-1]
         pull_low = pull['low']
         pull_high = pull['high']
 
-        min_pullback = self.config.get('signal_params', {}).get('min_pullback_percent', 0.3) / 100.0
+        min_pullback = self.config.get('signal_params', {}).get('min_pullback_percent', 0.5) / 100.0
 
+        # LONG: сигнальная зелёная, перед ней было 3+ красных
         if sig_color == 'green':
             red_cnt = self.count_consecutive_ha(ha_df, 'red')
             if red_cnt >= 3:
-                if pull_low <= sig_ha_close * (1 - min_pullback):
+                # Откат: текущая свеча должна опуститься ниже закрытия сигнальной на min_pullback
+                # Исключаем случай, когда свеча сразу ушла вверх (high > sig_ha_close)
+                if pull_low <= sig_ha_close * (1 - min_pullback) and pull_high < sig_ha_close:
                     return 'LONG'
+
+        # SHORT: сигнальная красная, перед ней было 3+ зелёных
         elif sig_color == 'red':
             green_cnt = self.count_consecutive_ha(ha_df, 'green')
             if green_cnt >= 3:
-                if pull_high >= sig_ha_close * (1 + min_pullback):
+                if pull_high >= sig_ha_close * (1 + min_pullback) and pull_low > sig_ha_close:
                     return 'SHORT'
+
         return None
 
     def calculate_heiken_ashi(self, df):
@@ -371,10 +379,15 @@ class TradingBot:
                     continue
                 if symbol in self.cooldown and datetime.now() < self.cooldown[symbol]:
                     continue
+                # временная блокировка после сигнала (5 минут)
+                if symbol in self.signal_block and datetime.now() < self.signal_block[symbol]:
+                    continue
                 try:
                     signal = await self.check_signal(symbol)
                     if signal is None:
                         continue
+                    # Блокируем символ на 5 минут, чтобы не было повторного сигнала
+                    self.signal_block[symbol] = datetime.now() + timedelta(minutes=5)
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
                     await self.open_first_order(symbol, price, signal)
@@ -391,7 +404,7 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Фиксированная сумма сделки: 100 USDT (без ограничений по балансу)\n"
+            f"Фиксированная сумма сделки: 100 USDT\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
             f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
