@@ -1,0 +1,24 @@
+# config.py
+
+BINGX_API_KEY = "YOUR_API_KEY"
+BINGX_API_SECRET = "YOUR_API_SECRET"
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+
+# Таймфрейм и стратегия
+TIMEFRAME = "6h"
+HEIKEN_ASHI_CANDLES = 100
+ATR_PERIOD = 14
+
+# Параметры входа
+RETRACEMENT_RATIO = 0.3  # 30% отката
+MAX_PULLBACK_RATIO = 0.5  # 50% макс. диапазон отката
+ATR_MIN_FACTOR = 0.005
+ATR_MAX_FACTOR = 3.0
+MAX_SIMULTANEOUS_POSITIONS = 5
+
+# Риск и размер
+RISK_PER_POSITION = 5.0  # 5 USD на позицию
+LEVERAGE = 20
+RR_SHORT = 1.5  # 1:1.5 RR для шорта
+RR_LONG = 1.5   # 1:1.5 RR для лонга
