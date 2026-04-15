@@ -131,7 +131,7 @@ class TradingBot:
 
     async def check_signal(self, symbol):
         timeframe = self.config['timeframe']
-        df = await self.get_market_data(symbol, timeframe, limit=30)
+        df = await self.get_market_data(symbol, limit=30)   # убрали лишний timeframe
         if df is None or len(df) < 6:
             return None
         if not self.is_mid_candle(df, timeframe):
@@ -219,7 +219,7 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT")
+            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, suma {trade_amount:.2f} USDT")
             pos = {
                 'side': side,
                 'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
