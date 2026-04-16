@@ -37,11 +37,13 @@ class TradingBot:
         self.cooldown = {}
         self.signal_block = {}
         self.cooldown_hours = self.config.get('cooldown_hours', 3)
-        self.min_volume = self.config.get('min_volume_24h', 50000)
-        self.max_volatility = self.config.get('volatility_filter_percent', 5)
 
-        # Фиксированная сумма сделки (без мартингейла)
-        self.fixed_trade_amount = self.config.get('fixed_trade_amount', 600.0)
+        # Глобальный мартингейл (можно отключить через use_martingale)
+        self.consecutive_losses = 0
+        self.base_trade_amount = self.config.get('base_trade_amount', 100.0)
+        self.use_martingale = self.config.get('use_martingale', True)
+        self.martingale_multiplier = self.config.get('martingale_multiplier', 2.0)
+        self.max_martingale_steps = self.config.get('max_martingale_steps', 3)
 
         # Статистика
         self.stats = self.load_stats()
@@ -142,22 +144,8 @@ class TradingBot:
             logger.error(f"Ошибка Telegram: {e}")
 
     async def is_suitable_symbol(self, symbol):
-        try:
-            ticker = await self.exchange.fetch_ticker(symbol)
-            volume_24h = ticker.get('quoteVolume', 0)
-            if volume_24h < self.min_volume:
-                return False
-            high = ticker.get('high', 0)
-            low = ticker.get('low', 0)
-            if low > 0:
-                volatility = (high - low) / low * 100
-                if volatility > self.max_volatility:
-                    return False
-            return True
-        except Exception as e:
-            if 'pause currently' in str(e) or 'not found' in str(e):
-                self.blacklist.add(symbol)
-            return False
+        # Фильтры объёма и волатильности отключены (всегда возвращаем True)
+        return True
 
     async def load_markets(self):
         await self.exchange.load_markets()
@@ -264,7 +252,11 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     def get_trade_amount(self):
-        return self.fixed_trade_amount
+        if not self.use_martingale:
+            return self.base_trade_amount
+        if self.consecutive_losses >= self.max_martingale_steps:
+            return self.base_trade_amount
+        return self.base_trade_amount * (self.martingale_multiplier ** self.consecutive_losses)
 
     async def open_position(self, symbol, price, side):
         trade_amount = self.get_trade_amount()
@@ -343,7 +335,15 @@ class TradingBot:
 
             self.save_trade(symbol, pos['side'], pos['entry_price'], current_price, pnl, reason)
 
-            # Мартингейла нет – ничего не обновляем
+            if reason == 'stop_loss':
+                self.consecutive_losses += 1
+                logger.info(f"Стоп-лосс, серия убытков: {self.consecutive_losses}")
+            else:
+                self.consecutive_losses = 0
+                logger.info(f"Тейк-профит, мартингейл сброшен")
+
+            if self.consecutive_losses > self.max_martingale_steps:
+                self.consecutive_losses = 0
 
             del self.positions[symbol]
 
@@ -421,7 +421,8 @@ class TradingBot:
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Фиксированная сумма сделки: {self.fixed_trade_amount} USDT (без мартингейла)\n"
+            f"Базовая сумма сделки: {self.base_trade_amount} USDT\n"
+            f"Мартингейл: {'включён' if self.use_martingale else 'отключён'}\n"
             f"SL/TP: {self.config['trade_params'].get('sl_percent', 2.0)}% / {self.config['trade_params'].get('tp_percent', 2.0)}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
