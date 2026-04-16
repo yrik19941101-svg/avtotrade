@@ -4,20 +4,20 @@
     "exchange": "bingx",
     "api_key": "PepTr3BeOg2zhuEuEQuUxMAhqTducqFReThiZz1Sswu2JFbhtFUr1taG8K4fLpad6SrbDpkmjfVlSAcAkQ",
     "api_secret": "jY1q11RfNYKGIhUgnsBlfEKT1urG1vAXpgokWI6hOuLzsi0b6HtMDmRt05WVaFuwAWQeP5brn4P2r25UURhg",
-    "timeframe": "1h",
-    "max_positions": 2,
+    "timeframe": "2h",
+    "max_positions": 5,
     "cooldown_hours": 3,
     "min_volume_24h": 50000,
     "volatility_filter_percent": 5,
     "blacklist_symbols": [],
-    "base_trade_amount": 200,
+    "base_trade_amount": 300,
     "martingale_multiplier": 2.0,
     "max_martingale_steps": 0,
     "signal_params": {
         "min_pullback_percent": 0.5
     },
     "trade_params": {
-        "sl_percent": 2.0,
+        "sl_percent": 1.9,
         "tp_percent": 2.0
     }
 }
