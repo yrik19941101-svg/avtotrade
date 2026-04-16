@@ -5,6 +5,7 @@ import pandas as pd
 import json
 from datetime import datetime, timedelta
 from telegram import Bot
+import os
 
 CONFIG_FILE = "config.json"
 
@@ -32,13 +33,27 @@ class TradingBot:
         self.all_symbols = []
         self.blacklist = set()
         self.cooldown = {}
-        self.signal_block = {}          # временная блокировка после отправки сигнала
-        self.last_heartbeat = datetime.now()
-        self.cooldown_hours = self.config.get('cooldown_hours', 3)
-        self.min_volume = self.config.get('min_volume_24h', 50000)
-        self.max_volatility = self.config.get('volatility_filter_percent', 5)
-        self.dynamic_tp = self.config.get('dynamic_tp_enabled', True)
-        self.dynamic_tp_step = self.config.get('dynamic_tp_step', 1.0)
+        self.signal_block = {}
+        self.consecutive_losses = 0
+        self.base_trade_amount = config.get('base_trade_amount', 100.0)
+        self.martingale_multiplier = config.get('martingale_multiplier', 2.0)
+        self.max_martingale_steps = config.get('max_martingale_steps', 3)
+        self.min_volume = config.get('min_volume_24h', 50000)
+        self.max_volatility = config.get('volatility_filter_percent', 5)
+        self.cooldown_hours = config.get('cooldown_hours', 3)
+
+        # Статистика
+        self.stats = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_pnl': 0.0,
+            'max_drawdown': 0.0,
+            'current_drawdown': 0.0,
+            'peak_balance': 0.0,
+            'history': []   # список словарей с деталями каждой сделки
+        }
+        self.start_balance = 0.0
 
         blacklist_from_config = self.config.get('blacklist_symbols', [])
         for sym in blacklist_from_config:
@@ -59,16 +74,49 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка Telegram: {e}")
 
-    async def heartbeat(self):
-        now = datetime.now()
-        if (now - self.last_heartbeat).total_seconds() >= 900:
-            balance = await self.get_balance()
-            msg = (f"🟢 БОТ АКТИВЕН\n"
-                   f"Время: {now.strftime('%H:%M:%S')}\n"
-                   f"Открытых позиций: {len(self.positions)}\n"
-                   f"Баланс: {balance:.2f} USDT")
-            await self.send_telegram(msg)
-            self.last_heartbeat = now
+    async def update_stats(self, trade_result):
+        """Обновляет статистику после закрытия сделки"""
+        self.stats['total_trades'] += 1
+        pnl = trade_result['pnl']
+        self.stats['total_pnl'] += pnl
+        if pnl > 0:
+            self.stats['winning_trades'] += 1
+        else:
+            self.stats['losing_trades'] += 1
+        self.stats['history'].append(trade_result)
+
+        # Текущая просадка
+        current_balance = await self.get_balance()
+        if current_balance > self.stats['peak_balance']:
+            self.stats['peak_balance'] = current_balance
+        drawdown = (self.stats['peak_balance'] - current_balance) / self.stats['peak_balance'] * 100 if self.stats['peak_balance'] > 0 else 0
+        self.stats['current_drawdown'] = drawdown
+        if drawdown > self.stats['max_drawdown']:
+            self.stats['max_drawdown'] = drawdown
+
+        # Сохраняем статистику в файл
+        with open('statistics.json', 'w', encoding='utf-8') as f:
+            json.dump(self.stats, f, indent=4, ensure_ascii=False)
+
+    async def send_stats_report(self):
+        """Отправляет сводку статистики в Telegram"""
+        win_rate = (self.stats['winning_trades'] / self.stats['total_trades'] * 100) if self.stats['total_trades'] > 0 else 0
+        avg_win = 0
+        avg_loss = 0
+        if self.stats['winning_trades'] > 0:
+            avg_win = sum(t['pnl'] for t in self.stats['history'] if t['pnl'] > 0) / self.stats['winning_trades']
+        if self.stats['losing_trades'] > 0:
+            avg_loss = sum(t['pnl'] for t in self.stats['history'] if t['pnl'] < 0) / self.stats['losing_trades']
+        msg = (f"📊 СТАТИСТИКА ТОРГОВЛИ\n"
+               f"Всего сделок: {self.stats['total_trades']}\n"
+               f"Прибыльных: {self.stats['winning_trades']} ({win_rate:.1f}%)\n"
+               f"Убыточных: {self.stats['losing_trades']}\n"
+               f"Общий PnL: {self.stats['total_pnl']:.2f} USDT\n"
+               f"Средняя прибыль: {avg_win:.2f}\n"
+               f"Средний убыток: {avg_loss:.2f}\n"
+               f"Макс. просадка: {self.stats['max_drawdown']:.2f}%\n"
+               f"Текущая серия убытков: {self.consecutive_losses}")
+        await self.send_telegram(msg)
 
     async def is_suitable_symbol(self, symbol):
         try:
@@ -142,33 +190,26 @@ class TradingBot:
         if len(ha_df) < 4:
             return None
 
-        sig = ha_df.iloc[-2]      # сигнальная свеча (закрыта)
-        pull = ha_df.iloc[-1]     # текущая свеча (незакрытая, откат)
+        sig = ha_df.iloc[-2]
+        pull = ha_df.iloc[-1]
 
         sig_color = sig['ha_color']
         sig_ha_close = sig['ha_close']
-
         pull_low = pull['low']
         pull_high = pull['high']
 
         min_pullback = self.config.get('signal_params', {}).get('min_pullback_percent', 0.5) / 100.0
 
-        # LONG: сигнальная зелёная, перед ней было 3+ красных
         if sig_color == 'green':
             red_cnt = self.count_consecutive_ha(ha_df, 'red')
             if red_cnt >= 3:
-                # Откат: текущая свеча должна опуститься ниже закрытия сигнальной на min_pullback
-                # Исключаем случай, когда свеча сразу ушла вверх (high > sig_ha_close)
                 if pull_low <= sig_ha_close * (1 - min_pullback) and pull_high < sig_ha_close:
                     return 'LONG'
-
-        # SHORT: сигнальная красная, перед ней было 3+ зелёных
         elif sig_color == 'red':
             green_cnt = self.count_consecutive_ha(ha_df, 'green')
             if green_cnt >= 3:
                 if pull_high >= sig_ha_close * (1 + min_pullback) and pull_low > sig_ha_close:
                     return 'SHORT'
-
         return None
 
     def calculate_heiken_ashi(self, df):
@@ -200,12 +241,13 @@ class TradingBot:
         market = self.exchange.market(symbol)
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
-    async def get_position_size(self, symbol, price):
-        # Фиксированная сумма 100 USDT (без ограничений по балансу)
-        return 100.0
+    def get_trade_amount(self):
+        if self.consecutive_losses >= self.max_martingale_steps:
+            return self.base_trade_amount
+        return self.base_trade_amount * (self.martingale_multiplier ** self.consecutive_losses)
 
-    async def open_first_order(self, symbol, price, side):
-        trade_amount = await self.get_position_size(symbol, price)
+    async def open_position(self, symbol, price, side):
+        trade_amount = self.get_trade_amount()
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
             quantity = trade_amount / price
@@ -224,146 +266,127 @@ class TradingBot:
                 amount=quantity,
                 params={'positionSide': side}
             )
-            logger.info(f"🟢 ОТКРЫТ ПЕРВЫЙ ОРДЕР {side} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT")
-            pos = {
+            logger.info(f"🟢 ОТКРЫТА {side} {symbol}: {quantity} по {price}, сумма {trade_amount:.2f} USDT")
+
+            sl_percent = self.config['trade_params'].get('sl_percent', 2.0) / 100.0
+            tp_percent = self.config['trade_params'].get('tp_percent', 2.0) / 100.0
+            if side == 'LONG':
+                stop_price = price * (1 - sl_percent)
+                take_price = price * (1 + tp_percent)
+            else:
+                stop_price = price * (1 + sl_percent)
+                take_price = price * (1 - tp_percent)
+
+            self.positions[symbol] = {
                 'side': side,
-                'orders': [{'price': price, 'amount': trade_amount, 'quantity': quantity}],
-                'step': 1,
-                'avg_price': price,
-                'total_qty': quantity,
+                'entry_price': price,
+                'quantity': quantity,
+                'stop_price': stop_price,
+                'take_price': take_price,
+                'trade_amount': trade_amount,
                 'open_time': datetime.now()
             }
-            tp_percent = self.config['trade_params']['tp_percent']
-            if self.dynamic_tp:
-                pos['tp_percent'] = tp_percent
-            else:
-                pos['tp_percent'] = tp_percent
-            self.positions[symbol] = pos
+
             balance = await self.get_balance()
-            msg = (f"🟢 ПЕРВЫЙ ОРДЕР {side}\n"
+            msg = (f"🟢 ОТКРЫТА СДЕЛКА {side}\n"
                    f"Монета: {symbol}\nЦена: {price:.5f}\nСумма: {trade_amount:.2f} USDT\n"
+                   f"SL: {stop_price:.5f} ({sl_percent*100:.1f}%)\n"
+                   f"TP: {take_price:.5f} ({tp_percent*100:.1f}%)\n"
                    f"Баланс: {balance:.2f} USDT")
             await self.send_telegram(msg)
             return True
         except Exception as e:
-            logger.error(f"Ошибка открытия первого ордера {symbol}: {e}")
+            logger.error(f"Ошибка открытия позиции {symbol}: {e}")
             if 'minimum amount' in str(e).lower():
                 self.blacklist.add(symbol)
             return False
 
-    async def add_martingale_order(self, symbol, current_price):
+    async def close_position(self, symbol, reason, current_price):
         if symbol not in self.positions:
             return
         pos = self.positions[symbol]
-        if pos['step'] >= self.config['trade_params']['max_steps']:
-            return
-        last_order = pos['orders'][-1]
-        step_percent = self.config['trade_params']['step_percent']
-        side = pos['side']
-        if side == 'LONG':
-            if current_price >= last_order['price'] * (1 - step_percent / 100):
-                return
-        else:
-            if current_price <= last_order['price'] * (1 + step_percent / 100):
-                return
-        new_step = pos['step'] + 1
-        multiplier = self.config['trade_params']['martingale_multiplier']
-        prev_amount = last_order['amount']
-        new_amount = prev_amount * multiplier
-        order_side = 'buy' if side == 'LONG' else 'sell'
         try:
-            quantity = new_amount / current_price
-            min_amount = await self.get_min_amount(symbol)
-            if quantity < min_amount:
-                logger.warning(f"{symbol}: количество {quantity} < {min_amount}, не добавляем ордер")
-                return
-            quantity = round(quantity, 5)
-            if quantity <= 0:
-                return
-            order = await self.exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side=order_side,
-                amount=quantity,
-                params={'positionSide': side}
-            )
-            logger.info(f"🟢 ДОБАВЛЕН ОРДЕР {side} (шаг {new_step}): {quantity} по {current_price}, сумма {new_amount:.2f} USDT")
-            pos['orders'].append({'price': current_price, 'amount': new_amount, 'quantity': quantity})
-            pos['step'] = new_step
-            total_qty = sum(o['quantity'] for o in pos['orders'])
-            avg_price = sum(o['price'] * o['quantity'] for o in pos['orders']) / total_qty
-            pos['avg_price'] = avg_price
-            pos['total_qty'] = total_qty
-            if self.dynamic_tp:
-                pos['tp_percent'] = self.config['trade_params']['tp_percent'] + (new_step - 1) * self.dynamic_tp_step
-                logger.info(f"{symbol}: TP увеличен до {pos['tp_percent']:.1f}%")
-            balance = await self.get_balance()
-            msg = (f"🟡 УСРЕДНЕНИЕ (шаг {new_step})\n"
-                   f"Монета: {symbol}\nЦена: {current_price:.5f}\nСумма: {new_amount:.2f} USDT\n"
-                   f"Средняя цена: {avg_price:.5f}\n"
-                   f"Тейк-профит: {pos['tp_percent']:.1f}%\n"
-                   f"Баланс: {balance:.2f} USDT")
-            await self.send_telegram(msg)
-        except Exception as e:
-            logger.error(f"Ошибка добавления ордера {symbol}: {e}")
-
-    async def check_take_profit(self, symbol, current_price):
-        if symbol not in self.positions:
-            return
-        pos = self.positions[symbol]
-        avg_price = pos['avg_price']
-        tp_percent = pos['tp_percent']
-        side = pos['side']
-        if side == 'LONG':
-            target_price = avg_price * (1 + tp_percent / 100)
-            if current_price >= target_price:
-                await self.close_all(symbol, current_price, 'take_profit')
-        else:
-            target_price = avg_price * (1 - tp_percent / 100)
-            if current_price <= target_price:
-                await self.close_all(symbol, current_price, 'take_profit')
-
-    async def close_all(self, symbol, current_price, reason):
-        if symbol not in self.positions:
-            return
-        pos = self.positions[symbol]
-        total_qty = pos['total_qty']
-        side = pos['side']
-        close_side = 'sell' if side == 'LONG' else 'buy'
-        try:
+            close_side = 'sell' if pos['side'] == 'LONG' else 'buy'
             await self.exchange.create_order(
                 symbol=symbol,
                 type='market',
                 side=close_side,
-                amount=total_qty,
-                params={'positionSide': side}
+                amount=pos['quantity'],
+                params={'positionSide': pos['side']}
             )
-            logger.info(f"🔴 ЗАКРЫТА ВСЯ ПОЗИЦИЯ {symbol} по {reason}, цена {current_price}")
-            balance = await self.get_balance()
-            msg = (f"🔴 ПОЗИЦИЯ ЗАКРЫТА\n"
-                   f"Монета: {symbol}\nПричина: {reason}\n"
-                   f"Цена закрытия: {current_price:.5f}\nБаланс: {balance:.2f} USDT")
-            await self.send_telegram(msg)
+            # Расчёт PnL
+            if pos['side'] == 'LONG':
+                pnl = (current_price - pos['entry_price']) * pos['quantity']
+            else:
+                pnl = (pos['entry_price'] - current_price) * pos['quantity']
+            pnl_percent = (pnl / pos['trade_amount']) * 100
+
+            trade_record = {
+                'symbol': symbol,
+                'direction': pos['side'],
+                'entry_price': pos['entry_price'],
+                'exit_price': current_price,
+                'amount': pos['trade_amount'],
+                'pnl': pnl,
+                'pnl_percent': pnl_percent,
+                'exit_reason': reason,
+                'time': datetime.now().isoformat()
+            }
+            await self.update_stats(trade_record)
+
+            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}, PnL: {pnl:.2f} USDT")
             del self.positions[symbol]
+
+            if reason == 'stop_loss':
+                self.consecutive_losses += 1
+                logger.info(f"Стоп-лосс, серия убытков: {self.consecutive_losses}")
+            else:
+                self.consecutive_losses = 0
+                logger.info(f"Тейк-профит, мартингейл сброшен")
+
+            if self.consecutive_losses > self.max_martingale_steps:
+                self.consecutive_losses = 0
+
+            balance = await self.get_balance()
+            emoji = "🔴" if reason == 'stop_loss' else "🟢"
+            msg = f"{emoji} СДЕЛКА ЗАКРЫТА\nМонета: {symbol}\nПричина: {reason}\nЦена: {current_price:.5f}\nPnL: {pnl:.2f} USDT ({pnl_percent:.1f}%)\nБаланс: {balance:.2f} USDT"
+            await self.send_telegram(msg)
+
             if reason == 'take_profit':
                 self.cooldown[symbol] = datetime.now() + timedelta(hours=self.cooldown_hours)
                 logger.info(f"{symbol}: заблокирована на {self.cooldown_hours} час(ов) после тейк-профита")
                 await self.send_telegram(f"🔒 {symbol}: блокировка на {self.cooldown_hours} час(ов) (тейк-профит)")
+
+            # Периодически отправляем статистику (каждые 10 сделок)
+            if self.stats['total_trades'] % 10 == 0 and self.stats['total_trades'] > 0:
+                await self.send_stats_report()
+
         except Exception as e:
-            logger.error(f"Ошибка закрытия позиции {symbol}: {e}")
+            logger.error(f"Ошибка закрытия {symbol}: {e}")
 
     async def monitor_position(self, symbol):
         try:
             ticker = await self.exchange.fetch_ticker(symbol)
             current_price = ticker['last']
-            await self.add_martingale_order(symbol, current_price)
-            await self.check_take_profit(symbol, current_price)
+            pos = self.positions.get(symbol)
+            if not pos:
+                return
+            if pos['side'] == 'LONG':
+                if current_price <= pos['stop_price']:
+                    await self.close_position(symbol, 'stop_loss', current_price)
+                elif current_price >= pos['take_price']:
+                    await self.close_position(symbol, 'take_profit', current_price)
+            else:
+                if current_price >= pos['stop_price']:
+                    await self.close_position(symbol, 'stop_loss', current_price)
+                elif current_price <= pos['take_price']:
+                    await self.close_position(symbol, 'take_profit', current_price)
         except Exception as e:
             logger.error(f"Ошибка мониторинга позиции {symbol}: {e}")
 
     async def scan_symbols(self):
         while True:
-            await self.heartbeat()
+            # Мониторим открытые позиции
             for symbol in list(self.positions.keys()):
                 await self.monitor_position(symbol)
 
@@ -379,18 +402,16 @@ class TradingBot:
                     continue
                 if symbol in self.cooldown and datetime.now() < self.cooldown[symbol]:
                     continue
-                # временная блокировка после сигнала (5 минут)
                 if symbol in self.signal_block and datetime.now() < self.signal_block[symbol]:
                     continue
                 try:
                     signal = await self.check_signal(symbol)
                     if signal is None:
                         continue
-                    # Блокируем символ на 5 минут, чтобы не было повторного сигнала
                     self.signal_block[symbol] = datetime.now() + timedelta(minutes=5)
                     ticker = await self.exchange.fetch_ticker(symbol)
                     price = ticker['last']
-                    await self.open_first_order(symbol, price, signal)
+                    await self.open_position(symbol, price, signal)
                     if len(self.positions) >= self.config['max_positions']:
                         break
                 except Exception as e:
@@ -399,17 +420,18 @@ class TradingBot:
             await asyncio.sleep(10)
 
     async def run(self):
+        # Сохраняем начальный баланс
+        self.start_balance = await self.get_balance()
+        self.stats['peak_balance'] = self.start_balance
         await self.load_markets()
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Фиксированная сумма сделки: 100 USDT\n"
+            f"Базовая сумма сделки: {self.base_trade_amount} USDT\n"
+            f"Мартингейл: {self.martingale_multiplier}x, до {self.max_martingale_steps} шагов\n"
+            f"SL/TP: {self.config['trade_params'].get('sl_percent', 2.0)}% / {self.config['trade_params'].get('tp_percent', 2.0)}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
-            f"Множитель: {self.config['trade_params']['martingale_multiplier']}x\n"
-            f"Шаг усреднения: {self.config['trade_params']['step_percent']}%\n"
-            f"TP: {self.config['trade_params']['tp_percent']}% (динамический)\n"
-            f"Блокировка после TP: {self.cooldown_hours} час(ов)\n"
             f"Баланс: {balance:.2f} USDT"
         )
         while True:
