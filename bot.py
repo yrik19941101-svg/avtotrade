@@ -3,11 +3,13 @@ import logging
 import ccxt.async_support as ccxt
 import pandas as pd
 import json
+import csv
+import os
 from datetime import datetime, timedelta
 from telegram import Bot
-import os
 
 CONFIG_FILE = "config.json"
+STATS_FILE = "trades.csv"
 
 def load_config():
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -34,31 +36,96 @@ class TradingBot:
         self.blacklist = set()
         self.cooldown = {}
         self.signal_block = {}
-        self.consecutive_losses = 0
-        self.base_trade_amount = config.get('base_trade_amount', 100.0)
-        self.martingale_multiplier = config.get('martingale_multiplier', 2.0)
-        self.max_martingale_steps = config.get('max_martingale_steps', 3)
-        self.min_volume = config.get('min_volume_24h', 50000)
-        self.max_volatility = config.get('volatility_filter_percent', 5)
-        self.cooldown_hours = config.get('cooldown_hours', 3)
+        self.cooldown_hours = self.config.get('cooldown_hours', 3)
+        self.min_volume = self.config.get('min_volume_24h', 50000)
+        self.max_volatility = self.config.get('volatility_filter_percent', 5)
+
+        # Фиксированная сумма сделки (без мартингейла)
+        self.fixed_trade_amount = self.config.get('fixed_trade_amount', 600.0)
 
         # Статистика
-        self.stats = {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_pnl': 0.0,
-            'max_drawdown': 0.0,
-            'current_drawdown': 0.0,
-            'peak_balance': 0.0,
-            'history': []   # список словарей с деталями каждой сделки
-        }
-        self.start_balance = 0.0
+        self.stats = self.load_stats()
+        self.total_pnl = self.stats.get('total_pnl', 0.0)
+        self.total_trades = self.stats.get('total_trades', 0)
+        self.winning_trades = self.stats.get('winning_trades', 0)
+        self.losing_trades = self.stats.get('losing_trades', 0)
+        self.max_consecutive_losses = self.stats.get('max_consecutive_losses', 0)
+        self.current_loss_streak = 0
 
         blacklist_from_config = self.config.get('blacklist_symbols', [])
         for sym in blacklist_from_config:
             self.blacklist.add(sym)
         logger.info(f"Загружено {len(blacklist_from_config)} символов в чёрный список")
+
+    def load_stats(self):
+        if not os.path.exists(STATS_FILE):
+            return {
+                'total_pnl': 0.0,
+                'total_trades': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'max_consecutive_losses': 0
+            }
+        df = pd.read_csv(STATS_FILE)
+        if df.empty:
+            return {
+                'total_pnl': 0.0,
+                'total_trades': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'max_consecutive_losses': 0
+            }
+        total_pnl = df['pnl'].sum()
+        total_trades = len(df)
+        winning_trades = len(df[df['pnl'] > 0])
+        losing_trades = len(df[df['pnl'] < 0])
+        max_streak = 0
+        current = 0
+        for pnl in df['pnl']:
+            if pnl < 0:
+                current += 1
+                if current > max_streak:
+                    max_streak = current
+            else:
+                current = 0
+        return {
+            'total_pnl': total_pnl,
+            'total_trades': total_trades,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'max_consecutive_losses': max_streak
+        }
+
+    def save_trade(self, symbol, side, entry_price, exit_price, pnl, reason):
+        with open(STATS_FILE, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if os.path.getsize(STATS_FILE) == 0:
+                writer.writerow(['timestamp', 'symbol', 'side', 'entry_price', 'exit_price', 'pnl', 'reason'])
+            writer.writerow([datetime.now().isoformat(), symbol, side, entry_price, exit_price, pnl, reason])
+
+        self.total_trades += 1
+        self.total_pnl += pnl
+        if pnl > 0:
+            self.winning_trades += 1
+            self.current_loss_streak = 0
+        else:
+            self.losing_trades += 1
+            self.current_loss_streak += 1
+            if self.current_loss_streak > self.max_consecutive_losses:
+                self.max_consecutive_losses = self.current_loss_streak
+
+    async def send_stats(self):
+        balance = await self.get_balance()
+        winrate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        msg = (f"📊 СТАТИСТИКА\n"
+               f"Баланс: {balance:.2f} USDT\n"
+               f"Всего сделок: {self.total_trades}\n"
+               f"Прибыльных: {self.winning_trades}\n"
+               f"Убыточных: {self.losing_trades}\n"
+               f"Winrate: {winrate:.1f}%\n"
+               f"Общая P&L: {self.total_pnl:.2f} USDT\n"
+               f"Макс. серия убытков: {self.max_consecutive_losses}")
+        await self.send_telegram(msg)
 
     async def get_balance(self):
         try:
@@ -73,50 +140,6 @@ class TradingBot:
             await self.telegram_bot.send_message(chat_id=self.config["telegram_chat_id"], text=message, parse_mode=None)
         except Exception as e:
             logger.error(f"Ошибка Telegram: {e}")
-
-    async def update_stats(self, trade_result):
-        """Обновляет статистику после закрытия сделки"""
-        self.stats['total_trades'] += 1
-        pnl = trade_result['pnl']
-        self.stats['total_pnl'] += pnl
-        if pnl > 0:
-            self.stats['winning_trades'] += 1
-        else:
-            self.stats['losing_trades'] += 1
-        self.stats['history'].append(trade_result)
-
-        # Текущая просадка
-        current_balance = await self.get_balance()
-        if current_balance > self.stats['peak_balance']:
-            self.stats['peak_balance'] = current_balance
-        drawdown = (self.stats['peak_balance'] - current_balance) / self.stats['peak_balance'] * 100 if self.stats['peak_balance'] > 0 else 0
-        self.stats['current_drawdown'] = drawdown
-        if drawdown > self.stats['max_drawdown']:
-            self.stats['max_drawdown'] = drawdown
-
-        # Сохраняем статистику в файл
-        with open('statistics.json', 'w', encoding='utf-8') as f:
-            json.dump(self.stats, f, indent=4, ensure_ascii=False)
-
-    async def send_stats_report(self):
-        """Отправляет сводку статистики в Telegram"""
-        win_rate = (self.stats['winning_trades'] / self.stats['total_trades'] * 100) if self.stats['total_trades'] > 0 else 0
-        avg_win = 0
-        avg_loss = 0
-        if self.stats['winning_trades'] > 0:
-            avg_win = sum(t['pnl'] for t in self.stats['history'] if t['pnl'] > 0) / self.stats['winning_trades']
-        if self.stats['losing_trades'] > 0:
-            avg_loss = sum(t['pnl'] for t in self.stats['history'] if t['pnl'] < 0) / self.stats['losing_trades']
-        msg = (f"📊 СТАТИСТИКА ТОРГОВЛИ\n"
-               f"Всего сделок: {self.stats['total_trades']}\n"
-               f"Прибыльных: {self.stats['winning_trades']} ({win_rate:.1f}%)\n"
-               f"Убыточных: {self.stats['losing_trades']}\n"
-               f"Общий PnL: {self.stats['total_pnl']:.2f} USDT\n"
-               f"Средняя прибыль: {avg_win:.2f}\n"
-               f"Средний убыток: {avg_loss:.2f}\n"
-               f"Макс. просадка: {self.stats['max_drawdown']:.2f}%\n"
-               f"Текущая серия убытков: {self.consecutive_losses}")
-        await self.send_telegram(msg)
 
     async def is_suitable_symbol(self, symbol):
         try:
@@ -197,7 +220,6 @@ class TradingBot:
         sig_ha_close = sig['ha_close']
         pull_low = pull['low']
         pull_high = pull['high']
-
         min_pullback = self.config.get('signal_params', {}).get('min_pullback_percent', 0.5) / 100.0
 
         if sig_color == 'green':
@@ -242,9 +264,7 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     def get_trade_amount(self):
-        if self.consecutive_losses >= self.max_martingale_steps:
-            return self.base_trade_amount
-        return self.base_trade_amount * (self.martingale_multiplier ** self.consecutive_losses)
+        return self.fixed_trade_amount
 
     async def open_position(self, symbol, price, side):
         trade_amount = self.get_trade_amount()
@@ -314,42 +334,22 @@ class TradingBot:
                 amount=pos['quantity'],
                 params={'positionSide': pos['side']}
             )
-            # Расчёт PnL
+            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}")
+
             if pos['side'] == 'LONG':
                 pnl = (current_price - pos['entry_price']) * pos['quantity']
             else:
                 pnl = (pos['entry_price'] - current_price) * pos['quantity']
-            pnl_percent = (pnl / pos['trade_amount']) * 100
 
-            trade_record = {
-                'symbol': symbol,
-                'direction': pos['side'],
-                'entry_price': pos['entry_price'],
-                'exit_price': current_price,
-                'amount': pos['trade_amount'],
-                'pnl': pnl,
-                'pnl_percent': pnl_percent,
-                'exit_reason': reason,
-                'time': datetime.now().isoformat()
-            }
-            await self.update_stats(trade_record)
+            self.save_trade(symbol, pos['side'], pos['entry_price'], current_price, pnl, reason)
 
-            logger.info(f"🔴 ЗАКРЫТА {symbol} по {reason}, цена {current_price}, PnL: {pnl:.2f} USDT")
+            # Мартингейла нет – ничего не обновляем
+
             del self.positions[symbol]
-
-            if reason == 'stop_loss':
-                self.consecutive_losses += 1
-                logger.info(f"Стоп-лосс, серия убытков: {self.consecutive_losses}")
-            else:
-                self.consecutive_losses = 0
-                logger.info(f"Тейк-профит, мартингейл сброшен")
-
-            if self.consecutive_losses > self.max_martingale_steps:
-                self.consecutive_losses = 0
 
             balance = await self.get_balance()
             emoji = "🔴" if reason == 'stop_loss' else "🟢"
-            msg = f"{emoji} СДЕЛКА ЗАКРЫТА\nМонета: {symbol}\nПричина: {reason}\nЦена: {current_price:.5f}\nPnL: {pnl:.2f} USDT ({pnl_percent:.1f}%)\nБаланс: {balance:.2f} USDT"
+            msg = f"{emoji} СДЕЛКА ЗАКРЫТА\nМонета: {symbol}\nПричина: {reason}\nЦена: {current_price:.5f}\nP&L: {pnl:.2f} USDT\nБаланс: {balance:.2f} USDT"
             await self.send_telegram(msg)
 
             if reason == 'take_profit':
@@ -357,10 +357,7 @@ class TradingBot:
                 logger.info(f"{symbol}: заблокирована на {self.cooldown_hours} час(ов) после тейк-профита")
                 await self.send_telegram(f"🔒 {symbol}: блокировка на {self.cooldown_hours} час(ов) (тейк-профит)")
 
-            # Периодически отправляем статистику (каждые 10 сделок)
-            if self.stats['total_trades'] % 10 == 0 and self.stats['total_trades'] > 0:
-                await self.send_stats_report()
-
+            await self.send_stats()
         except Exception as e:
             logger.error(f"Ошибка закрытия {symbol}: {e}")
 
@@ -386,7 +383,6 @@ class TradingBot:
 
     async def scan_symbols(self):
         while True:
-            # Мониторим открытые позиции
             for symbol in list(self.positions.keys()):
                 await self.monitor_position(symbol)
 
@@ -420,20 +416,17 @@ class TradingBot:
             await asyncio.sleep(10)
 
     async def run(self):
-        # Сохраняем начальный баланс
-        self.start_balance = await self.get_balance()
-        self.stats['peak_balance'] = self.start_balance
         await self.load_markets()
         asyncio.create_task(self.scan_symbols())
         balance = await self.get_balance()
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
-            f"Базовая сумма сделки: {self.base_trade_amount} USDT\n"
-            f"Мартингейл: {self.martingale_multiplier}x, до {self.max_martingale_steps} шагов\n"
+            f"Фиксированная сумма сделки: {self.fixed_trade_amount} USDT (без мартингейла)\n"
             f"SL/TP: {self.config['trade_params'].get('sl_percent', 2.0)}% / {self.config['trade_params'].get('tp_percent', 2.0)}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
         )
+        await self.send_stats()
         while True:
             await asyncio.sleep(60)
 
