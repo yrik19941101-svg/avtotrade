@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import csv
 import os
+import re
 from datetime import datetime, timedelta
 from telegram import Bot
 
@@ -37,14 +38,14 @@ class TradingBot:
         self.cooldown = {}
         self.signal_block = {}
         self.cooldown_hours = self.config.get('cooldown_hours', 3)
-        self.min_volume = self.config.get('min_volume_24h', 0)
-        self.max_volatility = self.config.get('volatility_filter_percent', 100)
+        self.api_blocked_until = None  # время до которого нельзя делать любые запросы к API
 
-        # Глобальный мартингейл (будет отключён через max_martingale_steps=0)
+        # Глобальный мартингейл (отключён)
         self.consecutive_losses = 0
-        self.base_trade_amount = self.config.get('base_trade_amount', 100.0)
+        self.base_trade_amount = self.config.get('base_trade_amount', 200.0)
+        self.use_martingale = self.config.get('use_martingale', False)
         self.martingale_multiplier = self.config.get('martingale_multiplier', 2.0)
-        self.max_martingale_steps = self.config.get('max_martingale_steps', 3)
+        self.max_martingale_steps = self.config.get('max_martingale_steps', 0)
 
         # Статистика
         self.stats = self.load_stats()
@@ -145,22 +146,7 @@ class TradingBot:
             logger.error(f"Ошибка Telegram: {e}")
 
     async def is_suitable_symbol(self, symbol):
-        try:
-            ticker = await self.exchange.fetch_ticker(symbol)
-            volume_24h = ticker.get('quoteVolume', 0)
-            if volume_24h < self.min_volume:
-                return False
-            high = ticker.get('high', 0)
-            low = ticker.get('low', 0)
-            if low > 0:
-                volatility = (high - low) / low * 100
-                if volatility > self.max_volatility:
-                    return False
-            return True
-        except Exception as e:
-            if 'pause currently' in str(e) or 'not found' in str(e):
-                self.blacklist.add(symbol)
-            return False
+        return True
 
     async def load_markets(self):
         await self.exchange.load_markets()
@@ -256,8 +242,18 @@ class TradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            if 'pause currently' in str(e) or 'not found' in str(e):
+            error_msg = str(e)
+            if 'pause currently' in error_msg or 'not found' in error_msg:
                 self.blacklist.add(symbol)
+            elif '109429' in error_msg:
+                # Извлекаем время блокировки
+                match = re.search(r'retry after time: (\d+)', error_msg)
+                if match:
+                    retry_ts = int(match.group(1)) / 1000.0
+                    self.api_blocked_until = datetime.fromtimestamp(retry_ts)
+                    logger.warning(f"API заблокирован до {self.api_blocked_until} из-за лимита ошибок")
+                else:
+                    self.api_blocked_until = datetime.now() + timedelta(minutes=15)
             else:
                 logger.error(f"Ошибка данных {symbol}: {e}")
             return None
@@ -267,11 +263,18 @@ class TradingBot:
         return market['limits']['amount']['min'] if 'limits' in market and 'amount' in market['limits'] else 0.0001
 
     def get_trade_amount(self):
+        if not self.use_martingale:
+            return self.base_trade_amount
         if self.consecutive_losses >= self.max_martingale_steps:
             return self.base_trade_amount
         return self.base_trade_amount * (self.martingale_multiplier ** self.consecutive_losses)
 
     async def open_position(self, symbol, price, side):
+        # Если API заблокирован, не пытаемся открывать сделки
+        if self.api_blocked_until and datetime.now() < self.api_blocked_until:
+            logger.debug(f"API заблокирован, пропускаем открытие {symbol}")
+            return False
+
         trade_amount = self.get_trade_amount()
         order_side = 'buy' if side == 'LONG' else 'sell'
         try:
@@ -321,9 +324,22 @@ class TradingBot:
             await self.send_telegram(msg)
             return True
         except Exception as e:
-            logger.error(f"Ошибка открытия позиции {symbol}: {e}")
-            if 'minimum amount' in str(e).lower():
+            error_msg = str(e)
+            if 'API orders are temporarily disabled' in error_msg or '109400' in error_msg:
+                logger.warning(f"{symbol}: API-торговля временно отключена биржей, добавляем в чёрный список")
                 self.blacklist.add(symbol)
+            elif '109429' in error_msg:
+                match = re.search(r'retry after time: (\d+)', error_msg)
+                if match:
+                    retry_ts = int(match.group(1)) / 1000.0
+                    self.api_blocked_until = datetime.fromtimestamp(retry_ts)
+                    logger.warning(f"API заблокирован до {self.api_blocked_until} из-за лимита ошибок")
+                else:
+                    self.api_blocked_until = datetime.now() + timedelta(minutes=15)
+            else:
+                logger.error(f"Ошибка открытия позиции {symbol}: {e}")
+                if 'minimum amount' in error_msg.lower():
+                    self.blacklist.add(symbol)
             return False
 
     async def close_position(self, symbol, reason, current_price):
@@ -396,6 +412,15 @@ class TradingBot:
 
     async def scan_symbols(self):
         while True:
+            # Если API заблокирован, ждём и не сканируем
+            if self.api_blocked_until and datetime.now() < self.api_blocked_until:
+                wait_seconds = (self.api_blocked_until - datetime.now()).total_seconds()
+                if wait_seconds > 0:
+                    logger.info(f"API заблокирован, ожидание {wait_seconds:.0f} секунд...")
+                    await asyncio.sleep(min(wait_seconds, 60))
+                    continue
+
+            # Мониторим открытые позиции
             for symbol in list(self.positions.keys()):
                 await self.monitor_position(symbol)
 
@@ -425,8 +450,9 @@ class TradingBot:
                         break
                 except Exception as e:
                     logger.error(f"Ошибка сканирования {symbol}: {e}")
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(10)
+                await asyncio.sleep(0.5)  # задержка между монетами
+            # Увеличенная пауза между полными циклами – 30 секунд
+            await asyncio.sleep(30)
 
     async def run(self):
         await self.load_markets()
@@ -435,7 +461,7 @@ class TradingBot:
         await self.send_telegram(
             f"🚀 ТОРГОВЫЙ БОТ ЗАПУЩЕН (Heiken Ashi, таймфрейм {self.config['timeframe']})\n"
             f"Базовая сумма сделки: {self.base_trade_amount} USDT\n"
-            f"Мартингейл: {'включён' if self.max_martingale_steps > 0 else 'отключён'}\n"
+            f"Мартингейл: {'включён' if self.use_martingale else 'отключён'}\n"
             f"SL/TP: {self.config['trade_params'].get('sl_percent', 2.0)}% / {self.config['trade_params'].get('tp_percent', 2.0)}%\n"
             f"Макс. позиций: {self.config['max_positions']}\n"
             f"Баланс: {balance:.2f} USDT"
