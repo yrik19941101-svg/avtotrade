@@ -10,7 +10,7 @@
     "min_volume_24h": 50000,
     "volatility_filter_percent": 5,
     "blacklist_symbols": [],
-    "fixed_trade_amount": 600,
+    "fixed_trade_amount": 200,
     "signal_params": {
         "min_pullback_percent": 0.5
     },
